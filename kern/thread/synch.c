@@ -39,7 +39,6 @@
 #include <thread.h>
 #include <current.h>
 #include <synch.h>
-#include <array.h>
 
 ////////////////////////////////////////////////////////////
 //

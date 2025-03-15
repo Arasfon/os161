@@ -39,6 +39,7 @@
 #include <thread.h>
 #include <current.h>
 #include <synch.h>
+#include <array.h>
 
 ////////////////////////////////////////////////////////////
 //
@@ -315,4 +316,151 @@ cv_broadcast(struct cv *cv, struct lock *lock)
 	wchan_wakeall(cv->cv_wchan, &cv->cv_spinlock);
 
 	spinlock_release(&cv->cv_spinlock);
+}
+
+////////////////////////////////////////////////////////////
+//
+// RW lock.
+
+// private
+
+static
+bool
+threadarray_removefirst(struct threadarray *a, struct thread *val) {
+	for (unsigned i = 0; i < threadarray_num(a); i++) {
+		if (threadarray_get(a, i) == val) {
+			threadarray_remove(a, i);
+			return true;
+		}
+	}
+	
+	return false;
+}
+
+// public
+
+struct rwlock *
+rwlock_create(const char *name) {
+	struct rwlock *rwlock;
+
+	rwlock = kmalloc(sizeof(*rwlock));
+	if (rwlock == NULL) {
+		return NULL;
+	}
+
+	rwlock->rwlock_name = kstrdup(name);
+	if (rwlock->rwlock_name==NULL) {
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->rwlock_lock = lock_create("rwlock_lock");
+	if (rwlock->rwlock_lock == NULL) {
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->rwlock_cv = cv_create("rwlock_cv");
+	if (rwlock->rwlock_cv == NULL) {
+		lock_destroy(rwlock->rwlock_lock);
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->rwlock_active_readers = threadarray_create();
+	if (rwlock->rwlock_active_readers == NULL) {
+		cv_destroy(rwlock->rwlock_cv);
+		lock_destroy(rwlock->rwlock_lock);
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->rwlock_waiting_writers_count = 0;
+	rwlock->rwlock_active_writer = NULL;
+
+	return rwlock;
+}
+
+void
+rwlock_destroy(struct rwlock *rwlock) {
+	KASSERT(rwlock != NULL);
+	KASSERT(threadarray_num(rwlock->rwlock_active_readers) == 0);
+	KASSERT(rwlock->rwlock_waiting_writers_count == 0);
+	KASSERT(rwlock->rwlock_active_writer == NULL);
+
+	threadarray_destroy(rwlock->rwlock_active_readers);
+	cv_destroy(rwlock->rwlock_cv);
+	lock_destroy(rwlock->rwlock_lock);
+	kfree(rwlock->rwlock_name);
+	kfree(rwlock);
+}
+
+void
+rwlock_acquire_read(struct rwlock *rwlock) {
+	KASSERT(rwlock != NULL);
+
+	lock_acquire(rwlock->rwlock_lock);
+
+	while (rwlock->rwlock_waiting_writers_count > 0 || rwlock->rwlock_active_writer != NULL) {
+		cv_wait(rwlock->rwlock_cv, rwlock->rwlock_lock);
+	}
+
+	unsigned out_index;
+	threadarray_add(rwlock->rwlock_active_readers, curthread, &out_index);
+
+	lock_release(rwlock->rwlock_lock);
+}
+
+void
+rwlock_release_read(struct rwlock *rwlock) {
+	KASSERT(rwlock != NULL);
+
+	lock_acquire(rwlock->rwlock_lock);
+
+	KASSERT(threadarray_removefirst(rwlock->rwlock_active_readers, curthread));
+	KASSERT(rwlock->rwlock_waiting_writers_count >= 0);
+
+	if (threadarray_num(rwlock->rwlock_active_readers) == 0) {
+		cv_broadcast(rwlock->rwlock_cv, rwlock->rwlock_lock);
+	}
+
+	lock_release(rwlock->rwlock_lock);
+}
+
+void
+rwlock_acquire_write(struct rwlock *rwlock) {
+	KASSERT(rwlock != NULL);
+	
+	lock_acquire(rwlock->rwlock_lock);
+
+	rwlock->rwlock_waiting_writers_count++;
+
+	while (threadarray_num(rwlock->rwlock_active_readers) > 0 || rwlock->rwlock_active_writer != NULL) {
+		cv_wait(rwlock->rwlock_cv, rwlock->rwlock_lock);
+	}
+
+	KASSERT(threadarray_num(rwlock->rwlock_active_readers) == 0);
+
+	rwlock->rwlock_waiting_writers_count--;
+	KASSERT(rwlock->rwlock_waiting_writers_count >= 0);
+	rwlock->rwlock_active_writer = curthread;
+
+	lock_release(rwlock->rwlock_lock);
+}
+
+void
+rwlock_release_write(struct rwlock *rwlock) {
+	KASSERT(rwlock != NULL);
+	KASSERT(rwlock->rwlock_active_writer == curthread);
+
+	lock_acquire(rwlock->rwlock_lock);
+
+	rwlock->rwlock_active_writer = NULL;
+
+	cv_broadcast(rwlock->rwlock_cv, rwlock->rwlock_lock);
+
+	lock_release(rwlock->rwlock_lock);
 }

@@ -36,6 +36,7 @@
 
 
 #include <spinlock.h>
+#include <thread.h>
 
 /*
  * Dijkstra-style semaphore.
@@ -151,8 +152,11 @@ void cv_broadcast(struct cv *cv, struct lock *lock);
 
 struct rwlock {
         char *rwlock_name;
-        // add what you need here
-        // (don't forget to mark things volatile as needed)
+        struct lock *rwlock_lock;
+        struct cv *rwlock_cv;
+        struct threadarray *rwlock_active_readers;
+        volatile int rwlock_waiting_writers_count;
+        struct thread *rwlock_active_writer;
 };
 
 struct rwlock * rwlock_create(const char *);

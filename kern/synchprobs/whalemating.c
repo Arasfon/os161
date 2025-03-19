@@ -70,10 +70,19 @@ void whalemating_init() {
 
 void
 whalemating_cleanup() {
+	matchmaker_count = 0;
+	female_count = 0;
+	male_count = 0;
+
 	lock_destroy(gl_lock);
 	sem_destroy(matchmaker_sem);
 	sem_destroy(female_sem);
 	sem_destroy(male_sem);
+
+	gl_lock = NULL;
+	matchmaker_sem = NULL;
+	female_sem = NULL;
+	male_sem = NULL;
 }
 
 void

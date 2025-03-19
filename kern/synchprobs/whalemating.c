@@ -43,7 +43,7 @@
 static struct semaphore *male_sem;
 static struct semaphore *female_sem;
 static struct semaphore *matchmaker_sem;
-static struct lock *gl_lock;
+static struct lock *global_lock;
 
 static volatile unsigned male_count;
 static volatile unsigned female_count;
@@ -54,10 +54,10 @@ static volatile unsigned matchmaker_count;
  */
 
 void whalemating_init() {
-	male_sem = sem_create("male_sem", 0);
-	female_sem = sem_create("female_sem", 0);
-	matchmaker_sem = sem_create("matchmaker_sem", 0);
-	gl_lock = lock_create("global_lock");
+	male_sem = sem_create("whalemating_male", 0);
+	female_sem = sem_create("whalemating_female", 0);
+	matchmaker_sem = sem_create("whalemating_matchmaker", 0);
+	global_lock = lock_create("whalemating_global");
 
 	male_count = 0;
 	female_count = 0;
@@ -74,12 +74,12 @@ whalemating_cleanup() {
 	female_count = 0;
 	male_count = 0;
 
-	lock_destroy(gl_lock);
+	lock_destroy(global_lock);
 	sem_destroy(matchmaker_sem);
 	sem_destroy(female_sem);
 	sem_destroy(male_sem);
 
-	gl_lock = NULL;
+	global_lock = NULL;
 	matchmaker_sem = NULL;
 	female_sem = NULL;
 	male_sem = NULL;
@@ -90,18 +90,18 @@ male(uint32_t index)
 {
 	male_start(index);
 
-	lock_acquire(gl_lock);
+	lock_acquire(global_lock);
 
 	if (female_count > 0 && matchmaker_count > 0) {
 		female_count--;
 		matchmaker_count--;
-		lock_release(gl_lock);
+		lock_release(global_lock);
 
 		V(female_sem);
 		V(matchmaker_sem);
 	} else {
 		male_count++;
-		lock_release(gl_lock);
+		lock_release(global_lock);
 		P(male_sem);
 	}
 
@@ -113,18 +113,18 @@ female(uint32_t index)
 {
 	female_start(index);
 
-	lock_acquire(gl_lock);
+	lock_acquire(global_lock);
 
 	if (male_count > 0 && matchmaker_count > 0) {
 		male_count--;
 		matchmaker_count--;
-		lock_release(gl_lock);
+		lock_release(global_lock);
 
 		V(male_sem);
 		V(matchmaker_sem);
 	} else {
 		female_count++;
-		lock_release(gl_lock);
+		lock_release(global_lock);
 		P(female_sem);
 	}
 
@@ -136,18 +136,18 @@ matchmaker(uint32_t index)
 {
 	matchmaker_start(index);
 
-	lock_acquire(gl_lock);
+	lock_acquire(global_lock);
 
 	if (male_count > 0 && female_count > 0) {
 		male_count--;
 		female_count--;
-		lock_release(gl_lock);
+		lock_release(global_lock);
 
 		V(male_sem);
 		V(female_sem);
 	} else {
 		matchmaker_count++;
-		lock_release(gl_lock);
+		lock_release(global_lock);
 		P(matchmaker_sem);
 	}
 

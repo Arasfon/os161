@@ -69,13 +69,153 @@
 #include <test.h>
 #include <synch.h>
 
+static struct cv *quadrant_lock_cv;
+static struct lock *global_lock;
+
+static bool quadrant_locked[4];
+
+static
+void
+lock_turning_right(uint32_t direction) {
+	int first_quadrant = direction;
+
+	lock_acquire(global_lock);
+
+	while (quadrant_locked[first_quadrant]) {
+		cv_wait(quadrant_lock_cv, global_lock);
+	}
+
+	quadrant_locked[first_quadrant] = true;
+
+	lock_release(global_lock);
+}
+
+static
+void
+unlock_turning_right(uint32_t direction, uint32_t current_step) {
+	int first_quadrant = direction;
+
+	if (current_step != 0) {
+		panic("stoplight: wrong right turn step");
+	}
+
+	lock_acquire(global_lock);
+
+	quadrant_locked[first_quadrant] = false;
+	cv_broadcast(quadrant_lock_cv, global_lock);
+
+	lock_release(global_lock);
+}
+
+static
+void
+lock_going_straight(uint32_t direction) {
+	int first_quadrant = direction;
+	int second_quadrant = (direction + 3) % 4;
+
+	lock_acquire(global_lock);
+
+	while (quadrant_locked[first_quadrant] || quadrant_locked[second_quadrant]) {
+		cv_wait(quadrant_lock_cv, global_lock);
+	}
+
+	quadrant_locked[first_quadrant] = true;
+	quadrant_locked[second_quadrant] = true;
+
+	lock_release(global_lock);
+}
+
+static
+void
+unlock_going_straight(uint32_t direction, uint32_t current_step) {
+	int first_quadrant = direction;
+	int second_quadrant = (direction + 3) % 4;
+
+	if (current_step > 1) {
+		panic("stoplight: wrong straight going step");
+	}
+
+	lock_acquire(global_lock);
+
+	switch (current_step)
+	{
+	case 0:
+		quadrant_locked[first_quadrant] = false;
+		break;
+	case 1:
+		quadrant_locked[second_quadrant] = false;
+		break;
+	}
+
+	cv_broadcast(quadrant_lock_cv, global_lock);
+
+	lock_release(global_lock);
+}
+
+static
+void
+lock_turning_left(uint32_t direction) {
+	int first_quadrant = direction;
+	int second_quadrant = (direction + 3) % 4;
+	int third_quadrant = (direction + 2) % 4;
+
+	lock_acquire(global_lock);
+
+	while (quadrant_locked[first_quadrant] || quadrant_locked[second_quadrant] || quadrant_locked[third_quadrant]) {
+		cv_wait(quadrant_lock_cv, global_lock);
+	}
+
+	quadrant_locked[first_quadrant] = true;
+	quadrant_locked[second_quadrant] = true;
+	quadrant_locked[third_quadrant] = true;
+
+	lock_release(global_lock);
+}
+
+static
+void
+unlock_turning_left(uint32_t direction, uint32_t current_step) {
+	int first_quadrant = direction;
+	int second_quadrant = (direction + 3) % 4;
+	int third_quadrant = (direction + 2) % 4;
+
+	if (current_step > 2) {
+		panic("stoplight: wrong left turn step");
+	}
+
+	lock_acquire(global_lock);
+
+	switch (current_step)
+	{
+	case 0:
+		quadrant_locked[first_quadrant] = false;
+		break;
+	case 1:
+		quadrant_locked[second_quadrant] = false;
+		break;
+	case 2:
+		quadrant_locked[third_quadrant] = false;
+		break;
+	}
+
+	cv_broadcast(quadrant_lock_cv, global_lock);
+
+	lock_release(global_lock);
+}
+
 /*
  * Called by the driver during initialization.
  */
 
 void
 stoplight_init() {
-	return;
+	quadrant_lock_cv = cv_create("stoplight");
+	global_lock = lock_create("stoplight_global");
+
+	quadrant_locked[0] = false;
+	quadrant_locked[1] = false;
+	quadrant_locked[2] = false;
+	quadrant_locked[3] = false;
 }
 
 /*
@@ -83,36 +223,58 @@ stoplight_init() {
  */
 
 void stoplight_cleanup() {
-	return;
+	lock_destroy(global_lock);
+
+	cv_destroy(quadrant_lock_cv);
+
+	global_lock = NULL;
+
+	quadrant_lock_cv = NULL;
+
+	quadrant_locked[3] = false;
+	quadrant_locked[2] = false;
+	quadrant_locked[1] = false;
+	quadrant_locked[0] = false;
 }
 
 void
 turnright(uint32_t direction, uint32_t index)
 {
-	(void)direction;
-	(void)index;
-	/*
-	 * Implement this function.
-	 */
-	return;
+	int first_quadrant = direction;
+
+	lock_turning_right(direction);
+	inQuadrant(first_quadrant, index);
+	leaveIntersection(index);
+	unlock_turning_right(direction, 0);
 }
+
 void
 gostraight(uint32_t direction, uint32_t index)
 {
-	(void)direction;
-	(void)index;
-	/*
-	 * Implement this function.
-	 */
-	return;
+	int first_quadrant = direction;
+	int second_quadrant = (direction + 3) % 4;
+
+	lock_going_straight(direction);
+	inQuadrant(first_quadrant, index);
+	inQuadrant(second_quadrant, index);
+	unlock_going_straight(direction, 0);
+	leaveIntersection(index);
+	unlock_going_straight(direction, 1);
 }
+
 void
 turnleft(uint32_t direction, uint32_t index)
 {
-	(void)direction;
-	(void)index;
-	/*
-	 * Implement this function.
-	 */
-	return;
+	int first_quadrant = direction;
+	int second_quadrant = (direction + 3) % 4;
+	int third_quadrant = (direction + 2) % 4;
+
+	lock_turning_left(direction);
+	inQuadrant(first_quadrant, index);
+	inQuadrant(second_quadrant, index);
+	unlock_turning_left(direction, 0);
+	inQuadrant(third_quadrant, index);
+	unlock_turning_left(direction, 1);
+	leaveIntersection(index);
+	unlock_turning_left(direction, 2);
 }

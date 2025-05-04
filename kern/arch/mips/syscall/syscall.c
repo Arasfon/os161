@@ -100,24 +100,39 @@ syscall(struct trapframe *tf)
 	retval = 0;
 
 	switch (callno) {
-	    case SYS_reboot:
+	    case SYS_reboot: // 119
 		err = sys_reboot(tf->tf_a0);
 		break;
 
-	    case SYS___time:
+	    case SYS___time: // 113
 		err = sys___time((userptr_t)tf->tf_a0,
 				 (userptr_t)tf->tf_a1);
 		break;
 
 	    /* Add stuff here */
-		case SYS_open:
+		case SYS_open: // 45
 		err = sys_open((userptr_t)tf->tf_a0, tf->tf_a1, tf->tf_a2, &retval);
 		break;
-		case SYS_read:
+		case SYS_dup2: // 48
+		err = sys_dup2(tf->tf_a0, tf->tf_a1, &retval);
+		break;
+		case SYS_close: // 49
+		err = sys_close(tf->tf_a0);
+		break;
+		case SYS_read: // 50
 		err = sys_read(tf->tf_a0, (userptr_t)tf->tf_a1, tf->tf_a2, &retval);
 		break;
-		case SYS_write:
+		case SYS_write: // 55
 		err = sys_write(tf->tf_a0, (userptr_t)tf->tf_a1, tf->tf_a2, &retval);
+		break;
+		case SYS_lseek: // 59
+		err = sys_lseek(tf->tf_a0, (off_t)tf->tf_a1, tf->tf_a2, &retval);
+		break;
+		case SYS_chdir: // 74
+		err = sys_chdir((userptr_t)tf->tf_a0);
+		break;
+		case SYS___getcwd: // 76
+		err = sys___getcwd((userptr_t)tf->tf_a0, tf->tf_a1, &retval);
 		break;
 
 	    default:

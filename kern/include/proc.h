@@ -37,6 +37,7 @@
  */
 
 #include <synch.h>
+#include <array.h>
 
 struct addrspace;
 struct thread;
@@ -79,6 +80,13 @@ struct proc {
 	struct lock *p_lock;		/* Lock for this structure */
 	unsigned p_numthreads;		/* Number of threads in this process */
 
+	pid_t p_pid;		/* PID */
+	int p_retval;		/* The exit code */
+	bool p_has_exited;		/* Has process exited? */
+	struct cv *p_cv;			/* For parent to wait on */
+	struct proc *p_parent;		/* Parent (or NULL) */
+	struct array *p_children;	/* Children */
+
 	/* VM */
 	struct addrspace *p_addrspace;	/* virtual address space */
 
@@ -114,6 +122,23 @@ struct addrspace *proc_getas(void);
 
 /* Change the address space of the current process, and return the old one. */
 struct addrspace *proc_setas(struct addrspace *);
+
+/* PID HADNLING */
+
+/* Initialize the PID table. Should be called early in the boot process. */
+void pid_table_bootstrap(void);
+
+/* Destroy the PID table. Should it be called in the shutdown process? */
+void pid_table_destroy(void);
+
+/* Lookup a process by PID. */
+struct proc *pid_table_lookup(pid_t pid);
+
+/* Allocate a PID. */
+int pid_alloc(struct proc *proc, pid_t *pid);
+
+/* Free a PID. */
+int pid_free(pid_t pid);
 
 /* FILE HANDLING */
 

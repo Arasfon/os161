@@ -49,11 +49,17 @@
 #include <addrspace.h>
 #include <vnode.h>
 #include <synch.h>
-
+#include <limits.h>
+#include <kern/errno.h>
+#include <spinlock.h>
 /*
  * The process for the kernel; this holds all the kernel-only threads.
  */
 struct proc *kproc;
+
+static struct proc *pid_table[PID_MAX];
+static struct spinlock pid_table_lock;
+static pid_t next_pid = PID_MIN;
 
 /*
  * Create a proc structure.
@@ -76,6 +82,23 @@ proc_create(const char *name)
 
 	proc->p_numthreads = 0;
 	proc->p_lock = lock_create("proc_lock");
+	KASSERT(proc->p_lock);
+
+	pid_t pid;
+	int err = pid_alloc(proc, &pid);
+	if (err) {
+		panic("pid_alloc failed: %d\n", err);
+		return NULL;
+	}
+
+	proc->p_pid = pid;
+	proc->p_retval = 0;
+	proc->p_has_exited = false;
+	proc->p_cv = cv_create("proc_cv");
+	KASSERT(proc->p_cv);
+	proc->p_parent = NULL;
+	proc->p_children = array_create();
+	KASSERT(proc->p_children);
 
 	/* VM fields */
 	proc->p_addrspace = NULL;
@@ -87,6 +110,32 @@ proc_create(const char *name)
 	proc->p_fdtable = NULL;
 	proc->p_fdtable_size = 0;
 	proc->p_fdtable_lock = NULL;
+
+	return proc;
+}
+
+static
+struct proc *
+proc_create_sys(const char *name, pid_t pid) {
+	KASSERT(pid >= 0 && pid < PID_MIN);
+	
+	pid_t old_next_pid = next_pid;
+
+	struct proc *proc = proc_create(name);
+
+	pid_free(proc->p_pid);
+
+	// Manually register the process
+	spinlock_acquire(&pid_table_lock);
+	proc->p_pid = pid;
+
+	pid_table[pid] = proc;
+	spinlock_release(&pid_table_lock);
+
+	// Technically by the time we get here, the next_pid could have changed
+	// but it doesn't matter much because we will still get to the good pid
+	// albeit with more iterations
+	next_pid = old_next_pid;
 
 	return proc;
 }
@@ -116,6 +165,10 @@ proc_destroy(struct proc *proc)
 	 * reference to this structure. (Otherwise it would be
 	 * incorrect to destroy it.)
 	 */
+
+	pid_free(proc->p_pid);
+	array_destroy(proc->p_children);
+	cv_destroy(proc->p_cv);
 
 	/* VFS fields */
 	if (proc->p_cwd) {
@@ -189,7 +242,7 @@ proc_destroy(struct proc *proc)
 void
 proc_bootstrap(void)
 {
-	kproc = proc_create("[kernel]");
+	kproc = proc_create_sys("[kernel]", 0);
 	if (kproc == NULL) {
 		panic("proc_create for kproc failed\n");
 	}
@@ -334,4 +387,100 @@ proc_setas(struct addrspace *newas)
 	proc->p_addrspace = newas;
 	lock_release(proc->p_lock);
 	return oldas;
+}
+
+/* PID HANDLING */
+
+void
+pid_table_bootstrap(void)
+{
+    spinlock_init(&pid_table_lock);
+
+    spinlock_acquire(&pid_table_lock);
+
+    for (int i = 0; i < PID_MAX; i++) {
+        pid_table[i] = NULL;
+    }
+
+    next_pid = PID_MIN;
+
+    spinlock_release(&pid_table_lock);
+}
+
+void
+pid_table_destroy(void)
+{
+    spinlock_cleanup(&pid_table_lock);
+}
+
+struct proc *
+pid_table_lookup(pid_t pid)
+{
+    struct proc *p = NULL;
+	
+    spinlock_acquire(&pid_table_lock);
+
+	// Ignore the kernel process
+    if (pid > 0 && pid < PID_MAX) {
+        p = pid_table[pid];
+    }
+
+    spinlock_release(&pid_table_lock);
+
+    return p;
+}
+
+int
+pid_alloc(struct proc *proc, pid_t *pid)
+{
+    KASSERT(pid != NULL);
+
+    spinlock_acquire(&pid_table_lock);
+
+    for (int i = 0; i < PID_MAX-1; i++) {
+
+        pid_t candidate = (next_pid + i) % PID_MAX;
+
+        if (candidate < PID_MIN) {
+            continue;
+        }
+
+        if (pid_table[candidate] == NULL) {
+            pid_table[candidate] = proc;
+
+            next_pid = (candidate + 1) % PID_MAX;
+
+            *pid = candidate;
+
+            spinlock_release(&pid_table_lock);
+
+            return 0;
+        }
+    }
+
+    spinlock_release(&pid_table_lock);
+
+    return ENPROC;
+}
+
+int
+pid_free(pid_t pid)
+{
+    if (pid < PID_MIN || pid >= PID_MAX) {
+        return EINVAL;
+    }
+
+    spinlock_acquire(&pid_table_lock);
+
+    if (pid_table[pid] == NULL) {
+        spinlock_release(&pid_table_lock);
+
+        return EINVAL;
+    }
+
+    pid_table[pid] = NULL;
+
+    spinlock_release(&pid_table_lock);
+
+    return 0;
 }

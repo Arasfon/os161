@@ -44,17 +44,17 @@ struct vnode;
 
 /* Definition of a file handle */
 struct file_handle {
-	struct vnode *fh_vnode;     /* The vnode this file refers to */
-	off_t fh_offset;            /* Current position in the file */
-	unsigned fh_refcount;       /* Number of references to this file handle */
-	int fh_flags;               /* Open flags (O_RDONLY, etc.) */
-	struct lock *fh_lock;       /* Lock for this file handle */
+	struct vnode *fh_vnode;		/* The vnode this file refers to */
+	off_t fh_offset;			/* Current position in the file */
+	unsigned fh_refcount;		/* Number of references to this file handle */
+	int fh_flags;				/* Open flags (O_RDONLY, etc.) */
+	struct lock *fh_lock;		/* Lock for this file handle */
 };
 
 /* File descriptor table entry */
 struct file_descriptor {
-	struct file_handle *fd_file;    /* File handle if in use, NULL if free */
-	int fd_flags;                   /* Flags for the file descriptor */
+	struct file_handle *fd_file;		/* File handle if in use, NULL if free */
+	int fd_flags;						/* Flags for the file descriptor */
 };
 
 /*
@@ -86,9 +86,9 @@ struct proc {
 	struct vnode *p_cwd;		/* current working directory */
 
 	/* File descriptor table */
-	struct file_descriptor *p_fdtable;  /* Open file table */
-	int p_fdtable_size;              /* Size of file table */
-	struct lock *p_fdtable_lock;     /* Lock for file table */
+	struct file_descriptor *p_fdtable;	/* Open file table */
+	int p_fdtable_size;					/* Size of file table */
+	struct lock *p_fdtable_lock;		/* Lock for file table */
 };
 
 /* This is the process structure for the kernel and for kernel-only threads. */

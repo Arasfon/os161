@@ -36,7 +36,7 @@
  * Note: curproc is defined by <current.h>.
  */
 
-#include <spinlock.h>
+#include <synch.h>
 
 struct addrspace;
 struct thread;
@@ -76,7 +76,7 @@ struct file_descriptor {
  */
 struct proc {
 	char *p_name;			/* Name of this process */
-	struct spinlock p_lock;		/* Lock for this structure */
+	struct lock *p_lock;		/* Lock for this structure */
 	unsigned p_numthreads;		/* Number of threads in this process */
 
 	/* VM */

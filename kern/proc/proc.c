@@ -48,6 +48,7 @@
 #include <current.h>
 #include <addrspace.h>
 #include <vnode.h>
+#include <synch.h>
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -74,7 +75,7 @@ proc_create(const char *name)
 	}
 
 	proc->p_numthreads = 0;
-	spinlock_init(&proc->p_lock);
+	proc->p_lock = lock_create("proc_lock");
 
 	/* VM fields */
 	proc->p_addrspace = NULL;
@@ -171,7 +172,7 @@ proc_destroy(struct proc *proc)
 	}
 
 	KASSERT(proc->p_numthreads == 0);
-	spinlock_cleanup(&proc->p_lock);
+	lock_destroy(proc->p_lock);
 
 	/* Destroy the file descriptor table */
 	if (proc->p_fdtable) {
@@ -221,12 +222,12 @@ proc_create_runprogram(const char *name)
 	 * (We don't need to lock the new process, though, as we have
 	 * the only reference to it.)
 	 */
-	spinlock_acquire(&curproc->p_lock);
+	lock_acquire(curproc->p_lock);
 	if (curproc->p_cwd != NULL) {
 		VOP_INCREF(curproc->p_cwd);
 		newproc->p_cwd = curproc->p_cwd;
 	}
-	spinlock_release(&curproc->p_lock);
+	lock_release(curproc->p_lock);
 
 	/* Initialize the file descriptor table */
 	int err = fdtable_init(newproc);
@@ -253,9 +254,9 @@ proc_addthread(struct proc *proc, struct thread *t)
 
 	KASSERT(t->t_proc == NULL);
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	proc->p_numthreads++;
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 
 	spl = splhigh();
 	t->t_proc = proc;
@@ -282,10 +283,10 @@ proc_remthread(struct thread *t)
 	proc = t->t_proc;
 	KASSERT(proc != NULL);
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	KASSERT(proc->p_numthreads > 0);
 	proc->p_numthreads--;
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 
 	spl = splhigh();
 	t->t_proc = NULL;
@@ -310,9 +311,9 @@ proc_getas(void)
 		return NULL;
 	}
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	as = proc->p_addrspace;
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 	return as;
 }
 
@@ -328,9 +329,9 @@ proc_setas(struct addrspace *newas)
 
 	KASSERT(proc != NULL);
 
-	spinlock_acquire(&proc->p_lock);
+	lock_acquire(proc->p_lock);
 	oldas = proc->p_addrspace;
 	proc->p_addrspace = newas;
-	spinlock_release(&proc->p_lock);
+	lock_release(proc->p_lock);
 	return oldas;
 }

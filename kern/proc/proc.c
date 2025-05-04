@@ -82,6 +82,11 @@ proc_create(const char *name)
 	/* VFS fields */
 	proc->p_cwd = NULL;
 
+	/* File descriptor table */
+	proc->p_fdtable = NULL;
+	proc->p_fdtable_size = 0;
+	proc->p_fdtable_lock = NULL;
+
 	return proc;
 }
 
@@ -168,6 +173,11 @@ proc_destroy(struct proc *proc)
 	KASSERT(proc->p_numthreads == 0);
 	spinlock_cleanup(&proc->p_lock);
 
+	/* Destroy the file descriptor table */
+	if (proc->p_fdtable) {
+		fdtable_destroy(proc);
+	}
+
 	kfree(proc->p_name);
 	kfree(proc);
 }
@@ -217,6 +227,12 @@ proc_create_runprogram(const char *name)
 		newproc->p_cwd = curproc->p_cwd;
 	}
 	spinlock_release(&curproc->p_lock);
+
+	/* Initialize the file descriptor table */
+	int err = fdtable_init(newproc);
+	if (err) {
+		panic("runprogram: could not init fdtable: %d\n", err);
+	}
 
 	return newproc;
 }

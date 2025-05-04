@@ -42,6 +42,21 @@ struct addrspace;
 struct thread;
 struct vnode;
 
+/* Definition of a file handle */
+struct file_handle {
+	struct vnode *fh_vnode;     /* The vnode this file refers to */
+	off_t fh_offset;            /* Current position in the file */
+	unsigned fh_refcount;       /* Number of references to this file handle */
+	int fh_flags;               /* Open flags (O_RDONLY, etc.) */
+	struct lock *fh_lock;       /* Lock for this file handle */
+};
+
+/* File descriptor table entry */
+struct file_descriptor {
+	struct file_handle *fd_file;    /* File handle if in use, NULL if free */
+	int fd_flags;                   /* Flags for the file descriptor */
+};
+
 /*
  * Process structure.
  *
@@ -70,7 +85,10 @@ struct proc {
 	/* VFS */
 	struct vnode *p_cwd;		/* current working directory */
 
-	/* add more material here as needed */
+	/* File descriptor table */
+	struct file_descriptor *p_fdtable;  /* Open file table */
+	int p_fdtable_size;              /* Size of file table */
+	struct lock *p_fdtable_lock;     /* Lock for file table */
 };
 
 /* This is the process structure for the kernel and for kernel-only threads. */
@@ -97,5 +115,42 @@ struct addrspace *proc_getas(void);
 /* Change the address space of the current process, and return the old one. */
 struct addrspace *proc_setas(struct addrspace *);
 
+/* FILE HANDLING */
+
+/* Allocate, initialize, return a new file_handle with refcount==1 (or error) */
+int fh_create(struct vnode *vn, int flags, struct file_handle **retfh);
+
+/* Bump the refcount (for dup/fork) */
+void fh_acquire(struct file_handle *fh);
+
+/* Drop one reference; when it hits zero: vfs_close(vn), destroy lock, free() */
+void fh_release(struct file_handle *fh);
+
+/* Destroy immediately (only if you know refcount==0) */
+void fh_destroy(struct file_handle *fh);
+
+/* Init file descriptor table */
+int fdtable_init(struct proc *p);
+
+/* Destroy file descriptor table */
+int fdtable_destroy(struct proc *p);
+
+/* Allocate a file descriptor */
+int fdtable_alloc(struct proc *p, struct file_handle *fh, int *retfd);
+
+/* Free a file descriptor */
+int fdtable_free(struct proc *p, int fd);
+
+/* Return the file_handle for ‘fd’, or NULL + set error code if invalid/free */
+struct file_handle *fdtable_get(struct proc *p, int fd, int *err);
+
+/* Duplicate one slot to another (for dup2): bumps fh refcount appropriately */
+int fdtable_dup(struct proc *p, int oldfd, int newfd);
+
+/* Change the per‐fd flags (e.g. CLOEXEC) */
+int fdtable_setflags(struct proc *p, int fd, int flags);
+
+/* Close all descriptors (e.g. on exec or proc exit) */
+void fdtable_closeall(struct proc *p);
 
 #endif /* _PROC_H_ */

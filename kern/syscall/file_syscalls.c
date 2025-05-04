@@ -75,7 +75,7 @@ sys_read(int fd, userptr_t user_buf, size_t buflen, int *retval)
     // Set up a kernel‐side uio to describe the transfer
     struct iovec iov;
     struct uio ku;
-    uio_kinit(&iov, &ku, user_buf, buflen, offset, UIO_READ);
+    uio_uinit(&iov, &ku, user_buf, buflen, offset, UIO_READ);
 
     // Perform the read
     err = VOP_READ(fh->fh_vnode, &ku);
@@ -122,7 +122,7 @@ sys_write(int fd, userptr_t user_buf, size_t nbytes, int *retval)
     // Set up uio for the write
     struct iovec iov;
     struct uio ku;
-    uio_kinit(&iov, &ku, user_buf, nbytes, offset, UIO_WRITE);
+    uio_uinit(&iov, &ku, user_buf, nbytes, offset, UIO_WRITE);
 
     // Perform the write
     err = VOP_WRITE(fh->fh_vnode, &ku);

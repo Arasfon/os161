@@ -43,6 +43,9 @@ struct addrspace;
 struct thread;
 struct vnode;
 
+#define ITEMINLINE
+DECLARRAY_BYTYPE(procarray, struct proc, ITEMINLINE);
+
 /* Definition of a file handle */
 struct file_handle {
 	struct vnode *fh_vnode;		/* The vnode this file refers to */
@@ -77,15 +80,16 @@ struct file_descriptor {
  */
 struct proc {
 	char *p_name;			/* Name of this process */
-	struct lock *p_lock;		/* Lock for this structure */
+	struct spinlock p_lock;		/* Lock for general operations */
 	unsigned p_numthreads;		/* Number of threads in this process */
 
 	pid_t p_pid;		/* PID */
 	int p_retval;		/* The exit code */
 	bool p_has_exited;		/* Has process exited? */
 	struct cv *p_cv;			/* For parent to wait on */
+	struct lock *p_cv_lock;		/* Lock for cv */
 	struct proc *p_parent;		/* Parent (or NULL) */
-	struct array *p_children;	/* Children */
+	struct procarray *p_children;		/* Children */
 
 	/* VM */
 	struct addrspace *p_addrspace;	/* virtual address space */

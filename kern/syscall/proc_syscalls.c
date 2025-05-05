@@ -33,13 +33,13 @@ sys__exit(int exitcode)
 	}
 
 	// Record exit status and wake up any waiters
-	lock_acquire(p->p_lock);
+	lock_acquire(p->p_cv_lock);
 	
 	p->p_retval = _MKWAIT_EXIT(exitcode);
 	p->p_has_exited = true;
-	cv_broadcast(p->p_cv, p->p_lock);
+	cv_broadcast(p->p_cv, p->p_cv_lock);
 
-	lock_release(p->p_lock);
+	lock_release(p->p_cv_lock);
 
 	// We will not free the pid here because zombie processes exist
 	// Process will be destroyed in sys_waitpid()
@@ -75,15 +75,15 @@ sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
 	}
 
 	// Wait for it to exit
-	lock_acquire(child->p_lock);
+	lock_acquire(child->p_cv_lock);
 
 	while (!child->p_has_exited) {
-		cv_wait(child->p_cv, child->p_lock);
+		cv_wait(child->p_cv, child->p_cv_lock);
 	}
 
 	exitstatus = child->p_retval;
 
-	lock_release(child->p_lock);
+	lock_release(child->p_cv_lock);
 
 	// Copy the exit status out to userspace
 	err = copyout(&exitstatus, statusptr, sizeof(int));

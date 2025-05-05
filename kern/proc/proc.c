@@ -52,6 +52,8 @@
 #include <limits.h>
 #include <kern/errno.h>
 #include <spinlock.h>
+#include <array.h>
+
 /*
  * The process for the kernel; this holds all the kernel-only threads.
  */
@@ -60,6 +62,24 @@ struct proc *kproc;
 static struct proc *pid_table[PID_MAX];
 static struct spinlock pid_table_lock;
 static pid_t next_pid = PID_MIN;
+
+#ifndef ITEMINLINE
+#define ITEMINLINE INLINE
+#endif
+DEFARRAY_BYTYPE(procarray, struct proc, ITEMINLINE);
+
+static
+bool
+procarray_removefirst(struct procarray *a, struct proc *val) {
+	for (unsigned i = 0; i < procarray_num(a); i++) {
+		if (procarray_get(a, i) == val) {
+			procarray_remove(a, i);
+			return true;
+		}
+	}
+	
+	return false;
+}
 
 /*
  * Create a proc structure.
@@ -81,8 +101,9 @@ proc_create(const char *name)
 	}
 
 	proc->p_numthreads = 0;
-	proc->p_lock = lock_create("proc_lock");
-	KASSERT(proc->p_lock);
+	spinlock_init(&proc->p_lock);
+	proc->p_cv_lock = lock_create("proc_cv_lock");
+	KASSERT(proc->p_cv_lock);
 
 	pid_t pid;
 	int err = pid_alloc(proc, &pid);
@@ -97,7 +118,7 @@ proc_create(const char *name)
 	proc->p_cv = cv_create("proc_cv");
 	KASSERT(proc->p_cv);
 	proc->p_parent = NULL;
-	proc->p_children = array_create();
+	proc->p_children = procarray_create();
 	KASSERT(proc->p_children);
 
 	/* VM fields */
@@ -167,7 +188,7 @@ proc_destroy(struct proc *proc)
 	 */
 
 	pid_free(proc->p_pid);
-	array_destroy(proc->p_children);
+	procarray_destroy(proc->p_children);
 	cv_destroy(proc->p_cv);
 
 	/* VFS fields */
@@ -225,8 +246,8 @@ proc_destroy(struct proc *proc)
 	}
 
 	KASSERT(proc->p_numthreads == 0);
-	lock_destroy(proc->p_lock);
-
+	spinlock_cleanup(&proc->p_lock);
+	lock_destroy(proc->p_cv_lock);
 	/* Destroy the file descriptor table */
 	if (proc->p_fdtable) {
 		fdtable_destroy(proc);
@@ -275,12 +296,12 @@ proc_create_runprogram(const char *name)
 	 * (We don't need to lock the new process, though, as we have
 	 * the only reference to it.)
 	 */
-	lock_acquire(curproc->p_lock);
+	spinlock_acquire(&curproc->p_lock);
 	if (curproc->p_cwd != NULL) {
 		VOP_INCREF(curproc->p_cwd);
 		newproc->p_cwd = curproc->p_cwd;
 	}
-	lock_release(curproc->p_lock);
+	spinlock_release(&curproc->p_lock);
 
 	/* Initialize the file descriptor table */
 	int err = fdtable_init(newproc);
@@ -307,9 +328,9 @@ proc_addthread(struct proc *proc, struct thread *t)
 
 	KASSERT(t->t_proc == NULL);
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	proc->p_numthreads++;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
 	spl = splhigh();
 	t->t_proc = proc;
@@ -336,10 +357,10 @@ proc_remthread(struct thread *t)
 	proc = t->t_proc;
 	KASSERT(proc != NULL);
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	KASSERT(proc->p_numthreads > 0);
 	proc->p_numthreads--;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 
 	spl = splhigh();
 	t->t_proc = NULL;
@@ -364,9 +385,9 @@ proc_getas(void)
 		return NULL;
 	}
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	as = proc->p_addrspace;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 	return as;
 }
 
@@ -382,10 +403,10 @@ proc_setas(struct addrspace *newas)
 
 	KASSERT(proc != NULL);
 
-	lock_acquire(proc->p_lock);
+	spinlock_acquire(&proc->p_lock);
 	oldas = proc->p_addrspace;
 	proc->p_addrspace = newas;
-	lock_release(proc->p_lock);
+	spinlock_release(&proc->p_lock);
 	return oldas;
 }
 

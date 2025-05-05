@@ -5,6 +5,8 @@
 #include <vnode.h>
 #include <addrspace.h>
 #include <kern/wait.h>
+#include <kern/errno.h>
+#include <copyinout.h>
 
 int
 sys__exit(int exitcode)
@@ -47,6 +49,52 @@ sys__exit(int exitcode)
 
 	panic("sys__exit: thread_exit returned\n");
 	return 0; // Returning just to be consistent with other syscalls
+}
+
+int
+sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
+{
+	struct proc *child;
+	int exitstatus;
+	int err;
+
+	// We only support options==0 for now
+	if (options != 0) {
+		return EINVAL;
+	}
+
+	// Lookup the child in the PID table
+	child = pid_table_lookup(pid);
+	if (child == NULL) {
+		return ESRCH;
+	}
+
+	// Verify it really is our child
+	if (child->p_parent != curproc) {
+		return ECHILD;
+	}
+
+	// Wait for it to exit
+	lock_acquire(child->p_lock);
+
+	while (!child->p_has_exited) {
+		cv_wait(child->p_cv, child->p_lock);
+	}
+
+	exitstatus = child->p_retval;
+
+	lock_release(child->p_lock);
+
+	// Copy the exit status out to userspace
+	err = copyout(&exitstatus, statusptr, sizeof(int));
+	if (err) {
+		return err;
+	}
+
+	proc_destroy(child);
+
+	*retval = pid;
+	return 0;
 }
 
 int

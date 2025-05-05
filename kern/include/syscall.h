@@ -70,6 +70,7 @@ int sys_chdir(userptr_t pathname);
 int sys___getcwd(userptr_t buf, size_t buflen, int *retval);
 
 int sys__exit(int status);
+int sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval);
 int sys_getpid(int *retval);
 
 #endif /* _SYSCALL_H_ */

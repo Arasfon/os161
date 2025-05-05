@@ -35,6 +35,8 @@
 #include <thread.h>
 #include <current.h>
 #include <syscall.h>
+#include <endian.h>
+#include <copyinout.h>
 
 
 /*
@@ -80,6 +82,8 @@ syscall(struct trapframe *tf)
 {
 	int callno;
 	int32_t retval;
+	int64_t retval64;
+	bool is64bit_retval = false;
 	int err;
 
 	KASSERT(curthread != NULL);
@@ -98,6 +102,7 @@ syscall(struct trapframe *tf)
 	 */
 
 	retval = 0;
+	retval64 = 0;
 
 	switch (callno) {
 	    case SYS_reboot: // 119
@@ -126,8 +131,27 @@ syscall(struct trapframe *tf)
 		err = sys_write(tf->tf_a0, (userptr_t)tf->tf_a1, tf->tf_a2, &retval);
 		break;
 		case SYS_lseek: // 59
-		err = sys_lseek(tf->tf_a0, (off_t)tf->tf_a1, tf->tf_a2, &retval);
-		break;
+		{
+			is64bit_retval = true;
+
+			int fd = tf->tf_a0;
+
+			// The offset is passed in a2 and a3 as 64-bit value
+			// The whence is passed on the stack
+			int whence;
+			err = copyin((userptr_t)(tf->tf_sp + 16), &whence, sizeof(whence));
+			if (err) {
+				break;
+			}
+
+			// Construct the 64-bit offset from a1 and a2
+			uint64_t offset;
+			join32to64(tf->tf_a2, tf->tf_a3, &offset);
+
+			err = sys_lseek(fd, offset, whence, &retval64);
+
+			break;
+		}
 		case SYS_chdir: // 74
 		err = sys_chdir((userptr_t)tf->tf_a0);
 		break;
@@ -163,7 +187,15 @@ syscall(struct trapframe *tf)
 	}
 	else {
 		/* Success. */
-		tf->tf_v0 = retval;
+		if (is64bit_retval) {
+			uint32_t v0, v1;
+			split64to32(retval64, &v0, &v1);
+
+			tf->tf_v0 = v0;
+			tf->tf_v1 = v1;
+		} else {
+			tf->tf_v0 = retval;
+		}
 		tf->tf_a3 = 0;      /* signal no error */
 	}
 

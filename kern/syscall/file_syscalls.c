@@ -167,7 +167,7 @@ sys_write(int fd, userptr_t user_buf, size_t nbytes, int *retval)
 }
 
 int
-sys_lseek(int fd, off_t offset, int whence, int *retval)
+sys_lseek(int fd, off_t offset, int whence, int64_t *retval)
 {
 	int err;
 	struct file_handle *fh;

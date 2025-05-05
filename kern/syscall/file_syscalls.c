@@ -77,6 +77,7 @@ int
 sys_read(int fd, userptr_t user_buf, size_t buflen, int *retval)
 {
 	int err;
+	size_t got, delta;
 
 	// Increases refcount
 	struct file_handle *fh = fdtable_get(curproc, fd, &err);
@@ -90,8 +91,16 @@ sys_read(int fd, userptr_t user_buf, size_t buflen, int *retval)
 		return EBADF;
 	}
 
+	/*
+	* To achieve maximum concurrency, we reserve the offset for the duration of the read.
+	* This way, we don't have to lock the file handle for the duration of the read.
+	* This is safe because any short transfer is rolled back in the compensation step.
+	* VOP_READ() can sleep, so we need to release the lock before calling it.
+	*/
+
 	lock_acquire(fh->fh_lock);
 	off_t offset = fh->fh_offset;
+	fh->fh_offset = offset + buflen;
 	lock_release(fh->fh_lock);
 
 	// Set up a kernel‐side uio to describe the transfer
@@ -102,16 +111,26 @@ sys_read(int fd, userptr_t user_buf, size_t buflen, int *retval)
 	// Perform the read
 	err = VOP_READ(fh->fh_vnode, &ku);
 	if (err) {
+		lock_acquire(fh->fh_lock);
+		got = buflen - ku.uio_resid;
+		delta = buflen - got;
+		fh->fh_offset -= delta;
+		lock_release(fh->fh_lock);
+
 		fh_release(fh);
 		return err;
 	}
 
 	// Compute how many bytes were actually read
-	size_t got = buflen - ku.uio_resid;
+	got = buflen - ku.uio_resid;
+	delta = buflen - got;
 
-	lock_acquire(fh->fh_lock);
-	fh->fh_offset = ku.uio_offset;
-	lock_release(fh->fh_lock);
+	// Compensating for non-full buffer
+	if (delta > 0) {
+		lock_acquire(fh->fh_lock);
+		fh->fh_offset -= delta;
+		lock_release(fh->fh_lock);
+	}
 
 	fh_release(fh);
 
@@ -123,6 +142,7 @@ int
 sys_write(int fd, userptr_t user_buf, size_t nbytes, int *retval)
 {
 	int err;
+	size_t wrote, delta;
 
 	// Increases refcount
 	struct file_handle *fh = fdtable_get(curproc, fd, &err);
@@ -137,8 +157,16 @@ sys_write(int fd, userptr_t user_buf, size_t nbytes, int *retval)
 		return EBADF;
 	}
 
+	/*
+	* To achieve maximum concurrency, we reserve the offset for the duration of the write.
+	* This way, we don't have to lock the file handle for the duration of the write.
+	* This is safe because any short transfer is rolled back in the compensation step.
+	* VOP_WRITE() can sleep, so we need to release the lock before calling it.
+	*/
+
 	lock_acquire(fh->fh_lock);
 	off_t offset = fh->fh_offset;
+	fh->fh_offset = offset + nbytes;
 	lock_release(fh->fh_lock);
 
 	// Set up uio for the write
@@ -149,16 +177,26 @@ sys_write(int fd, userptr_t user_buf, size_t nbytes, int *retval)
 	// Perform the write
 	err = VOP_WRITE(fh->fh_vnode, &ku);
 	if (err) {
+		lock_acquire(fh->fh_lock);
+		wrote = nbytes - ku.uio_resid;
+		delta = nbytes - wrote;
+		fh->fh_offset -= delta;
+		lock_release(fh->fh_lock);
+
 		fh_release(fh);
 		return err;
 	}
 
-	// Compute how many bytes were written
-	size_t wrote = nbytes - ku.uio_resid;
+	// Compute how many bytes were actually written
+	wrote = nbytes - ku.uio_resid;
+	delta = nbytes - wrote;
 
-	lock_acquire(fh->fh_lock);
-	fh->fh_offset = ku.uio_offset;
-	lock_release(fh->fh_lock);
+	// Compensating for non-full output
+	if (delta > 0) {
+		lock_acquire(fh->fh_lock);
+		fh->fh_offset -= delta;
+		lock_release(fh->fh_lock);
+	}
 
 	fh_release(fh);
 

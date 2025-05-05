@@ -248,6 +248,7 @@ proc_destroy(struct proc *proc)
 	KASSERT(proc->p_numthreads == 0);
 	spinlock_cleanup(&proc->p_lock);
 	lock_destroy(proc->p_cv_lock);
+
 	/* Destroy the file descriptor table */
 	if (proc->p_fdtable) {
 		fdtable_destroy(proc);

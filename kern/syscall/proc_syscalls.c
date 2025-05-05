@@ -7,6 +7,84 @@
 #include <kern/wait.h>
 #include <kern/errno.h>
 #include <copyinout.h>
+#include <mips/trapframe.h>
+
+int
+sys_fork(struct trapframe *tf, pid_t *retval)
+{
+	struct proc *child;
+	struct addrspace *child_as;
+	int err, i;
+	struct trapframe *child_tf;
+
+	// Create the child proc structure
+	child = proc_create(curproc->p_name);
+	if (child == NULL) {
+		return ENPROC;
+	}
+
+	// Record parent/child relationship
+	child->p_parent = curproc;
+	spinlock_acquire(&curproc->p_lock);
+	procarray_add(curproc->p_children, child, NULL);
+	spinlock_release(&curproc->p_lock);
+
+	// Duplicate the address space
+	err = as_copy(curproc->p_addrspace, &child_as);
+	if (err) {
+		proc_destroy(child);
+		return err;
+	}
+	child->p_addrspace = child_as;
+
+	// Inherit current working directory
+	if (curproc->p_cwd) {
+		VOP_INCREF(curproc->p_cwd);
+		child->p_cwd = curproc->p_cwd;
+	}
+
+	// Duplicate the file-descriptor table
+	err = fdtable_init(child);
+	if (err) {
+		proc_destroy(child);
+		return err;
+	}
+	for (i = 0; i < curproc->p_fdtable_size; i++) {
+		struct file_handle *fh = curproc->p_fdtable[i].fd_file;
+		int flags = curproc->p_fdtable[i].fd_flags;
+		if (fh) {
+			// Bump handle refcount and install into child
+			fh_acquire(fh);
+			child->p_fdtable[i].fd_file = fh;
+			child->p_fdtable[i].fd_flags = flags;
+		}
+	}
+
+	// Prepare the child's trapframe
+	child_tf = kmalloc(sizeof(*child_tf));
+	if (child_tf == NULL) {
+		proc_destroy(child);
+		return ENOMEM;
+	}
+	*child_tf = *tf;	// Copy all registers
+
+	// Fork a thread in the child process
+	err = thread_fork(curthread->t_name,
+					  child,
+					  enter_forked_process,
+					  (void*)child_tf,	// Child's trapframe as a parameter
+					  1);		// nargs
+	if (err) {
+		kprintf("sys_fork: thread_fork failed\n");
+		kfree(child_tf);
+		proc_destroy(child);
+		return err;
+	}
+
+	// Return child's pid in parent
+	*retval = child->p_pid;
+	return 0;
+}
 
 int
 sys__exit(int exitcode)

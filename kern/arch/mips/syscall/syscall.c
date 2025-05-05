@@ -37,6 +37,7 @@
 #include <syscall.h>
 #include <endian.h>
 #include <copyinout.h>
+#include <addrspace.h>
 
 
 /*
@@ -159,6 +160,9 @@ syscall(struct trapframe *tf)
 		err = sys___getcwd((userptr_t)tf->tf_a0, tf->tf_a1, &retval);
 		break;
 
+		case SYS_fork: // 0
+		err = sys_fork(tf, &retval);
+		break;
 		case SYS__exit: // 3
 		err = sys__exit(tf->tf_a0);
 		break;
@@ -214,14 +218,25 @@ syscall(struct trapframe *tf)
 
 /*
  * Enter user mode for a newly forked process.
- *
- * This function is provided as a reminder. You need to write
- * both it and the code that calls it.
- *
- * Thus, you can trash it and do things another way if you prefer.
  */
 void
-enter_forked_process(struct trapframe *tf)
+enter_forked_process(void* data, unsigned long ndata)
 {
-	(void)tf;
+	KASSERT(ndata == 1);
+
+	struct trapframe *tf = (struct trapframe *)data;
+
+    // Copy into stack
+    struct trapframe tf_stack = *tf;
+    kfree(tf);
+
+	// In the child, fork() returns 0
+	tf_stack.tf_v0 = 0;
+	tf_stack.tf_a3 = 0;			// signal no error
+	tf_stack.tf_epc += 4;		// advance past the syscall
+
+	as_activate();
+
+	// Switch to user mode with this trapframe
+	mips_usermode(&tf_stack);
 }

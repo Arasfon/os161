@@ -84,7 +84,6 @@ procarray_removefirst(struct procarray *a, struct proc *val) {
 /*
  * Create a proc structure.
  */
-static
 struct proc *
 proc_create(const char *name)
 {
@@ -186,6 +185,12 @@ proc_destroy(struct proc *proc)
 	 * reference to this structure. (Otherwise it would be
 	 * incorrect to destroy it.)
 	 */
+
+	if (proc->p_parent != NULL) {
+		spinlock_acquire(&proc->p_parent->p_lock);
+		procarray_removefirst(proc->p_parent->p_children, proc);
+		spinlock_release(&proc->p_parent->p_lock);
+	}
 
 	pid_free(proc->p_pid);
 	procarray_destroy(proc->p_children);

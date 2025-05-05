@@ -81,6 +81,8 @@ sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
 		cv_wait(child->p_cv, child->p_cv_lock);
 	}
 
+	KASSERT(child->p_has_exited);
+
 	exitstatus = child->p_retval;
 
 	lock_release(child->p_cv_lock);

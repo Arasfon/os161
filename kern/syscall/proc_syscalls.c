@@ -140,6 +140,45 @@ sys__exit(int exitcode)
 }
 
 int
+sys_kwaitpid(pid_t pid, int options, int *statuscode)
+{
+	struct proc *proc;
+	int exitstatus;
+
+	// We only support options==0 for now
+	if (options != 0) {
+		return EINVAL;
+	}
+
+	// Lookup the child in the PID table
+	proc = pid_table_lookup(pid);
+	if (proc == NULL) {
+		return ESRCH;
+	}
+
+	// Don't care if it's our child or not, we are in the kernel, no one is our child
+
+	// Wait for it to exit
+	lock_acquire(proc->p_cv_lock);
+
+	while (!proc->p_has_exited) {
+		cv_wait(proc->p_cv, proc->p_cv_lock);
+	}
+
+	KASSERT(proc->p_has_exited);
+
+	exitstatus = proc->p_retval;
+
+	lock_release(proc->p_cv_lock);
+
+	*statuscode = exitstatus;
+
+	proc_destroy(proc);
+
+	return 0;
+}
+
+int
 sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
 {
 	struct proc *child;

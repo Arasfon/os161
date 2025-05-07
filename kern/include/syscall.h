@@ -74,6 +74,7 @@ int sys_fork(struct trapframe *tf, pid_t *retval);
 int sys_execv(userptr_t progname, userptr_t args);
 int sys_kexecv(char *kprogname, char **kargs);
 int sys__exit(int status);
+int sys_kwaitpid(pid_t pid, int options, int *statuscode);
 int sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval);
 int sys_getpid(int *retval);
 

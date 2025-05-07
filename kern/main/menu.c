@@ -154,10 +154,13 @@ common_prog(int nargs, char **args)
 		return result;
 	}
 
-	/*
-	 * The new process will be destroyed when the program exits...
-	 * once you write the code for handling that.
-	 */
+	// Wait for the program to finish
+	int statuscode;
+	int err = sys_kwaitpid(proc->p_pid, 0, &statuscode);
+	if (err) {
+		panic("common_prog: kwaitpid failed: %s\n", strerror(err));
+		return err;
+	}
 
 	// Wait for all threads to finish cleanup, otherwise khu be a bit behind,
 	// especially once swapping is enabled.

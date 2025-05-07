@@ -145,7 +145,7 @@ syscall(struct trapframe *tf)
 				break;
 			}
 
-			// Construct the 64-bit offset from a1 and a2
+			// Construct the 64-bit offset from a2 and a3
 			uint64_t offset;
 			join32to64(tf->tf_a2, tf->tf_a3, &offset);
 

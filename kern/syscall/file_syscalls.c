@@ -272,6 +272,26 @@ sys_lseek(int fd, off_t offset, int whence, int64_t *retval)
 }
 
 int
+sys_remove(userptr_t pathname)
+{
+	char pathbuf[PATH_MAX];
+	size_t actual;
+	int err;
+
+	err = copyinstr(pathname, pathbuf, sizeof(pathbuf), &actual);
+	if (err) {
+		return err;
+	}
+
+	err = vfs_remove(pathbuf);
+	if (err) {
+		return err;
+	}
+
+	return 0;
+}
+
+int
 sys_chdir(userptr_t path)
 {
 	char *kpath;

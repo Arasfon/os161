@@ -153,6 +153,9 @@ syscall(struct trapframe *tf)
 
 			break;
 		}
+		case SYS_remove: // 68
+		err = sys_remove((userptr_t)tf->tf_a0);
+		break;
 		case SYS_chdir: // 74
 		err = sys_chdir((userptr_t)tf->tf_a0);
 		break;

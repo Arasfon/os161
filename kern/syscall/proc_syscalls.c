@@ -176,9 +176,11 @@ sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
 	lock_release(child->p_cv_lock);
 
 	// Copy the exit status out to userspace
-	err = copyout(&exitstatus, statusptr, sizeof(int));
-	if (err) {
-		return err;
+	if (statusptr) {
+		err = copyout(&exitstatus, statusptr, sizeof(int));
+		if (err) {
+			return err;
+		}
 	}
 
 	proc_destroy(child);

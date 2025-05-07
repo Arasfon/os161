@@ -214,6 +214,12 @@ sys_lseek(int fd, off_t offset, int whence, int64_t *retval)
 	fh = fdtable_get(curproc, fd, &err);
 	if (fh == NULL) return err;
 
+	// Ensure the file supports seeking
+	if (!VOP_ISSEEKABLE(fh->fh_vnode)) {
+		fh_release(fh);
+		return ESPIPE;
+	}
+
 	// Compute new offset
 	lock_acquire(fh->fh_lock);
 

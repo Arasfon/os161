@@ -171,9 +171,9 @@ sys_kwaitpid(pid_t pid, int options, int *statuscode)
 
 	lock_release(proc->p_cv_lock);
 
-	*statuscode = exitstatus;
-
 	proc_destroy(proc);
+
+	*statuscode = exitstatus;
 
 	return 0;
 }
@@ -214,6 +214,8 @@ sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
 
 	lock_release(child->p_cv_lock);
 
+	proc_destroy(child);
+
 	// Copy the exit status out to userspace
 	if (statusptr) {
 		err = copyout(&exitstatus, statusptr, sizeof(int));
@@ -221,8 +223,6 @@ sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
 			return err;
 		}
 	}
-
-	proc_destroy(child);
 
 	*retval = pid;
 	return 0;

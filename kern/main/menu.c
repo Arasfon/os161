@@ -77,21 +77,36 @@ void
 cmd_progthread(void *ptr, unsigned long nargs)
 {
 	char **args = ptr;
-	char progname[128];
+	char *progname;
 	int result;
 
 	KASSERT(nargs >= 1);
 
-	if (nargs > 2) {
-		kprintf("Warning: argument passing from menu not supported\n");
-	}
-
 	/* Hope we fit. */
-	KASSERT(strlen(args[0]) < sizeof(progname));
+	KASSERT(strlen(args[0]) < PATH_MAX);
+
+	// Copy program name
+	progname = kmalloc(PATH_MAX);
+	if (!progname) {
+		kprintf("Running program %s failed: %s\n", args[0], strerror(ENOMEM));
+		return;
+	}
 
 	strcpy(progname, args[0]);
 
-	result = runprogram(progname);
+	// Copy args with expected NULL at the end
+    char **kargs = kmalloc((nargs+1)*sizeof(char *));
+    if (!kargs) {
+        kprintf("Running program %s failed: %s\n", args[0], strerror(ENOMEM));
+        return;
+    }
+
+    for (unsigned i = 0; i < nargs; i++) {
+        kargs[i] = args[i];
+    }
+    kargs[nargs] = NULL;
+
+	result = runprogram(progname, kargs);
 	if (result) {
 		kprintf("Running program %s failed: %s\n", args[0],
 			strerror(result));

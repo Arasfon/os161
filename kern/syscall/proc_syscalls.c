@@ -91,150 +91,6 @@ sys_fork(struct trapframe *tf, pid_t *retval)
 	return 0;
 }
 
-int
-sys__exit(int exitcode)
-{
-	struct proc *p = curproc;
-	struct addrspace *as;
-
-	// Close all open file descriptors
-	if (p->p_fdtable) {
-		fdtable_destroy(p);
-	}
-
-	// Release current working directory
-	if (p->p_cwd) {
-		VOP_DECREF(p->p_cwd);
-		p->p_cwd = NULL;
-	}
-
-	// Tear down address space
-	as = proc_setas(NULL);
-	as_deactivate();
-	if (as) {
-		as_destroy(as);
-	}
-
-	// Record exit status and wake up any waiters
-	lock_acquire(p->p_cv_lock);
-	
-	if (exitcode > 0 && exitcode <= _NSIG) {
-		p->p_retval = _MKWAIT_SIG(exitcode);
-	} else {
-		p->p_retval = _MKWAIT_EXIT(exitcode);
-	}
-
-	p->p_has_exited = true;
-	cv_broadcast(p->p_cv, p->p_cv_lock);
-
-	lock_release(p->p_cv_lock);
-
-	// We will not free the pid here because zombie processes exist
-	// Process will be destroyed in sys_waitpid()
-
-	// Does not return
-	thread_exit();
-
-	panic("sys__exit: thread_exit returned\n");
-	return 0; // Returning just to be consistent with other syscalls
-}
-
-int
-sys_kwaitpid(pid_t pid, int options, int *statuscode)
-{
-	struct proc *proc;
-	int exitstatus;
-
-	// We only support options==0 for now
-	if (options != 0) {
-		return EINVAL;
-	}
-
-	// Lookup the child in the PID table
-	proc = pid_table_lookup(pid);
-	if (proc == NULL) {
-		return ESRCH;
-	}
-
-	// Don't care if it's our child or not, we are in the kernel, no one is our child
-
-	// Wait for it to exit
-	lock_acquire(proc->p_cv_lock);
-
-	while (!proc->p_has_exited) {
-		cv_wait(proc->p_cv, proc->p_cv_lock);
-	}
-
-	KASSERT(proc->p_has_exited);
-
-	exitstatus = proc->p_retval;
-
-	lock_release(proc->p_cv_lock);
-
-	proc_destroy(proc);
-
-	*statuscode = exitstatus;
-
-	return 0;
-}
-
-int
-sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
-{
-	struct proc *child;
-	int exitstatus;
-	int err;
-
-	// We only support options==0 for now
-	if (options != 0) {
-		return EINVAL;
-	}
-
-	// Lookup the child in the PID table
-	child = pid_table_lookup(pid);
-	if (child == NULL) {
-		return ESRCH;
-	}
-
-	// Verify it really is our child
-	if (child->p_parent != curproc) {
-		return ECHILD;
-	}
-
-	// Wait for it to exit
-	lock_acquire(child->p_cv_lock);
-
-	while (!child->p_has_exited) {
-		cv_wait(child->p_cv, child->p_cv_lock);
-	}
-
-	KASSERT(child->p_has_exited);
-
-	exitstatus = child->p_retval;
-
-	lock_release(child->p_cv_lock);
-
-	proc_destroy(child);
-
-	// Copy the exit status out to userspace
-	if (statusptr) {
-		err = copyout(&exitstatus, statusptr, sizeof(int));
-		if (err) {
-			return err;
-		}
-	}
-
-	*retval = pid;
-	return 0;
-}
-
-int
-sys_getpid(int *retval)
-{
-	*retval = curproc->p_pid;
-	return 0;
-}
-
 static
 int
 execv_core(char *kprogname, int argc, char **kargs, size_t stringspace)
@@ -449,4 +305,148 @@ sys_kexecv(char *kprogname, char **kargs)
 	
 	// Should not return
 	return execv_core(kprogname, argc, kargs, stringspace);
+}
+
+int
+sys__exit(int exitcode)
+{
+	struct proc *p = curproc;
+	struct addrspace *as;
+
+	// Close all open file descriptors
+	if (p->p_fdtable) {
+		fdtable_destroy(p);
+	}
+
+	// Release current working directory
+	if (p->p_cwd) {
+		VOP_DECREF(p->p_cwd);
+		p->p_cwd = NULL;
+	}
+
+	// Tear down address space
+	as = proc_setas(NULL);
+	as_deactivate();
+	if (as) {
+		as_destroy(as);
+	}
+
+	// Record exit status and wake up any waiters
+	lock_acquire(p->p_cv_lock);
+	
+	if (exitcode > 0 && exitcode <= _NSIG) {
+		p->p_retval = _MKWAIT_SIG(exitcode);
+	} else {
+		p->p_retval = _MKWAIT_EXIT(exitcode);
+	}
+
+	p->p_has_exited = true;
+	cv_broadcast(p->p_cv, p->p_cv_lock);
+
+	lock_release(p->p_cv_lock);
+
+	// We will not free the pid here because zombie processes exist
+	// Process will be destroyed in sys_waitpid()
+
+	// Does not return
+	thread_exit();
+
+	panic("sys__exit: thread_exit returned\n");
+	return 0; // Returning just to be consistent with other syscalls
+}
+
+int
+sys_kwaitpid(pid_t pid, int options, int *statuscode)
+{
+	struct proc *proc;
+	int exitstatus;
+
+	// We only support options==0 for now
+	if (options != 0) {
+		return EINVAL;
+	}
+
+	// Lookup the child in the PID table
+	proc = pid_table_lookup(pid);
+	if (proc == NULL) {
+		return ESRCH;
+	}
+
+	// Don't care if it's our child or not, we are in the kernel, no one is our child
+
+	// Wait for it to exit
+	lock_acquire(proc->p_cv_lock);
+
+	while (!proc->p_has_exited) {
+		cv_wait(proc->p_cv, proc->p_cv_lock);
+	}
+
+	KASSERT(proc->p_has_exited);
+
+	exitstatus = proc->p_retval;
+
+	lock_release(proc->p_cv_lock);
+
+	proc_destroy(proc);
+
+	*statuscode = exitstatus;
+
+	return 0;
+}
+
+int
+sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval)
+{
+	struct proc *child;
+	int exitstatus;
+	int err;
+
+	// We only support options==0 for now
+	if (options != 0) {
+		return EINVAL;
+	}
+
+	// Lookup the child in the PID table
+	child = pid_table_lookup(pid);
+	if (child == NULL) {
+		return ESRCH;
+	}
+
+	// Verify it really is our child
+	if (child->p_parent != curproc) {
+		return ECHILD;
+	}
+
+	// Wait for it to exit
+	lock_acquire(child->p_cv_lock);
+
+	while (!child->p_has_exited) {
+		cv_wait(child->p_cv, child->p_cv_lock);
+	}
+
+	KASSERT(child->p_has_exited);
+
+	exitstatus = child->p_retval;
+
+	lock_release(child->p_cv_lock);
+
+	proc_destroy(child);
+
+	// Copy the exit status out to userspace
+	if (statusptr) {
+		err = copyout(&exitstatus, statusptr, sizeof(int));
+		if (err) {
+			return err;
+		}
+	}
+
+	*retval = pid;
+	return 0;
+}
+
+int
+sys_getpid(int *retval)
+{
+	*retval = curproc->p_pid;
+	return 0;
 }

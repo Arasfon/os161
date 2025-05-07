@@ -8,6 +8,10 @@
 #include <kern/errno.h>
 #include <copyinout.h>
 #include <mips/trapframe.h>
+#include <kern/fcntl.h>
+#include <limits.h>
+#include <lib.h>
+#include <vfs.h>
 
 int
 sys_fork(struct trapframe *tf, pid_t *retval)
@@ -182,4 +186,220 @@ sys_getpid(int *retval)
 {
 	*retval = curproc->p_pid;
 	return 0;
+}
+
+static
+int
+execv_core(char *kprogname, int argc, char **kargs, size_t stringspace)
+{
+	struct vnode *v;
+	struct addrspace *oldas;
+	struct addrspace *newas;
+	vaddr_t entrypoint, stackptr;
+	size_t i;
+	size_t ptrspace;
+	int err;
+
+	// Open the executable
+	err = vfs_open(kprogname, O_RDONLY, 0, &v);
+	if (err) {
+		return err;
+	}
+
+	// Destroy old address space
+	oldas = proc_getas();
+	if (oldas) {
+		as_deactivate();
+		as_destroy(oldas);
+	}
+
+	// Create and activate new address space
+	newas = as_create();
+	if (!newas) {
+		vfs_close(v);
+		return ENOMEM;
+	}
+	proc_setas(newas);
+	as_activate();
+
+	// Load the ELF executable
+	err = load_elf(v, &entrypoint);
+	vfs_close(v);
+	if (err) {
+		return err;
+	}
+
+	// Define the user stack
+	err = as_define_stack(newas, &stackptr);
+	if (err) {
+		return err;
+	}
+
+	// Compute pointer space
+	ptrspace = (argc + 1) * sizeof(userptr_t);
+
+	// Reserve stack space for strings and argv[]
+	stackptr -= stringspace;
+	stackptr -= ptrspace;
+	stackptr = ROUNDDOWN(stackptr, 4);
+
+	// Copy argument strings to user stack and record addresses
+	{
+		vaddr_t dest = stackptr + ptrspace;
+
+		for (i = 0; i < (size_t)argc; i++) {
+			size_t len = strlen(kargs[i]) + 1;
+
+			err = copyout(kargs[i], (userptr_t)dest, len);
+			if (err) {
+				return err;
+			}
+
+			kargs[i] = (char *)dest;
+			dest += ROUNDUP(len, 4);
+		}
+
+		kargs[argc] = NULL;
+	}
+
+	// Copy argv pointer array
+	err = copyout(kargs, (userptr_t)stackptr, ptrspace);
+	if (err) {
+		return err;
+	}
+
+	kfree(kargs);
+	kfree(kprogname);
+
+	// Does not return
+	enter_new_process(argc, (userptr_t)stackptr, NULL, stackptr, entrypoint);
+
+	panic("execv_core: enter_new_process returned\n");
+
+	return EINVAL;
+}
+
+int
+sys_execv(userptr_t progname, userptr_t args)
+{
+	char *kprogname = NULL;
+	char **kargs = NULL;
+	char *arg_buf = NULL;
+	char *tmparg = NULL;
+	size_t stringspace = 0;
+	int argc = 0;
+	int err;
+	size_t got;
+	userptr_t arg_addr;
+
+	// Copy program name
+	kprogname = kmalloc(PATH_MAX);
+	if (!kprogname) {
+		return ENOMEM;
+	}
+
+	err = copyinstr(progname, kprogname, PATH_MAX, &got);
+	if (err) {
+		kfree(kprogname);
+		return err;
+	}
+
+	// Temporary buffer for measuring args
+	tmparg = kmalloc(ARG_MAX + 1);
+	if (!tmparg) {
+		kfree(kprogname);
+		return ENOMEM;
+	}
+
+	// Count args and measure total padded size
+	while (true) {
+		err = copyin((userptr_t)&((userptr_t*)args)[argc], &arg_addr, sizeof(arg_addr));
+		if (err) {
+			kfree(kprogname);
+			kfree(tmparg);
+			return err;
+		}
+
+		if (arg_addr == NULL) {
+			break;
+		}
+
+		err = copyinstr(arg_addr, tmparg, ARG_MAX + 1, &got);
+		if (err) {
+			kfree(kprogname);
+			kfree(tmparg);
+			return err;
+		}
+
+		size_t padded = ROUNDUP(got, 4);
+
+		if (stringspace + padded < stringspace || stringspace + padded > ARG_MAX) {
+			kfree(kprogname);
+			kfree(tmparg);
+			return E2BIG;
+		}
+
+		stringspace += padded;
+		argc++;
+	}
+
+	kfree(tmparg);
+
+	arg_buf = kmalloc(stringspace);
+	if (!arg_buf) {
+		err = ENOMEM;
+		goto err;
+	}
+
+	kargs = kmalloc((argc + 1) * sizeof(char *));
+	if (!kargs) {
+		err = ENOMEM;
+		goto err;
+	}
+
+	// Copy each user arg into arg_buf and record in kargs[]
+	{
+		char *bufpos = arg_buf;
+		for (int i = 0; i < argc; i++) {
+			err = copyin((userptr_t)&((userptr_t*)args)[i], &arg_addr, sizeof(arg_addr));
+			if (err) {
+				goto err;
+			}
+
+			err = copyinstr(arg_addr, bufpos, stringspace - (bufpos - arg_buf), &got);
+			if (err) {
+				goto err;
+			}
+
+			kargs[i] = bufpos;
+			bufpos += ROUNDUP(got, 4);
+		}
+		kargs[argc] = NULL;
+	}
+
+	// Should not return
+	err = execv_core(kprogname, argc, kargs, stringspace);
+
+err:
+	if (arg_buf) kfree(arg_buf);
+	if (kargs) kfree(kargs);
+	if (kprogname) kfree(kprogname);
+
+	return err;
+}
+
+int
+sys_kexecv(char *kprogname, char **kargs)
+{
+	int argc = 0;
+	size_t stringspace = 0;
+	
+	while (kargs[argc] != NULL) {
+		size_t len = strlen(kargs[argc]) + 1;
+		stringspace += ROUNDUP(len, 4);
+		argc++;
+	}
+	
+	// Should not return
+	return execv_core(kprogname, argc, kargs, stringspace);
 }

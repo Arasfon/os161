@@ -12,6 +12,7 @@
 #include <limits.h>
 #include <lib.h>
 #include <vfs.h>
+#include <signal.h>
 
 int
 sys_fork(struct trapframe *tf, pid_t *retval)
@@ -117,7 +118,12 @@ sys__exit(int exitcode)
 	// Record exit status and wake up any waiters
 	lock_acquire(p->p_cv_lock);
 	
-	p->p_retval = _MKWAIT_EXIT(exitcode);
+	if (exitcode > 0 && exitcode <= _NSIG) {
+		p->p_retval = _MKWAIT_SIG(exitcode);
+	} else {
+		p->p_retval = _MKWAIT_EXIT(exitcode);
+	}
+
 	p->p_has_exited = true;
 	cv_broadcast(p->p_cv, p->p_cv_lock);
 

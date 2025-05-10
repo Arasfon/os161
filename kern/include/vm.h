@@ -38,11 +38,30 @@
 
 
 #include <machine/vm.h>
+#include <spinlock.h>
 
 /* Fault-type arguments to vm_fault() */
 #define VM_FAULT_READ        0    /* A read was attempted */
 #define VM_FAULT_WRITE       1    /* A write was attempted */
 #define VM_FAULT_READONLY    2    /* A write to a readonly page was attempted*/
+
+#define KVADDR_TO_PADDR(vaddr) ((vaddr) - MIPS_KSEG0)
+
+/* Coremap */
+
+enum cm_state {
+	CM_FREE, /* page available */
+	CM_FIXED, /* kernel / coremap / other wired page */
+	CM_USER /* page owned by a user address-space */
+};
+
+struct coremap_entry {
+	enum cm_state state; /* allocation state */
+	uint16_t chunk_len; /* run length if first page; else 0 */
+	struct addrspace *as; /* owning address-space (CM_USER) */
+	uint32_t vpn; /* user virtual page number */
+	bool dirty; /* page modified since last flush  */
+};
 
 
 /* Initialization function */
@@ -54,6 +73,9 @@ int vm_fault(int faulttype, vaddr_t faultaddress);
 /* Allocate/free kernel heap pages (called by kmalloc/kfree) */
 vaddr_t alloc_kpages(unsigned npages);
 void free_kpages(vaddr_t addr);
+
+/* Coremap dump for statistics */
+void coremap_dump(void);
 
 /*
  * Return amount of memory (in bytes) used by allocated coremap pages.  If

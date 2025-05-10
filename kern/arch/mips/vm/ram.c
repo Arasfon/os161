@@ -94,6 +94,9 @@ ram_bootstrap(void)
 paddr_t
 ram_stealmem(unsigned long npages)
 {
+	// We don't allow stealmem to work
+	KASSERT(0);
+
 	size_t size;
 	paddr_t paddr;
 

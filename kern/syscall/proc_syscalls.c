@@ -49,6 +49,7 @@ sys_fork(struct trapframe *tf, pid_t *retval)
 	}
 
 	// Duplicate the file-descriptor table
+	// We are not initializing console because we are copying it over
 	err = fdtable_init(child);
 	if (err) {
 		proc_destroy(child);

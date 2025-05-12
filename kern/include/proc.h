@@ -164,6 +164,9 @@ void fh_destroy(struct file_handle *fh);
 /* Init file descriptor table */
 int fdtable_init(struct proc *p);
 
+/* Init console in the file descriptor table */
+int fdtable_init_console(struct proc *p);
+
 /* Destroy file descriptor table */
 int fdtable_destroy(struct proc *p);
 

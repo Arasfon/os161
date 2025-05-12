@@ -102,8 +102,6 @@ open_console(int openflags, struct file_handle **fh_out)
 int
 fdtable_init(struct proc *p)
 {
-	int err;
-
 	p->p_fdtable_lock = lock_create("fdtable_lock");
 	if (!p->p_fdtable_lock) return ENOMEM;
 
@@ -122,6 +120,13 @@ fdtable_init(struct proc *p)
 	}
 	lock_release(p->p_fdtable_lock);
 
+	return 0;
+}
+
+int
+fdtable_init_console(struct proc *p)
+{
+	int err;
 	struct file_handle *fh[3];
 	int modes[3] = { O_RDONLY, O_WRONLY, O_WRONLY };
 

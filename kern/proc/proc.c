@@ -314,6 +314,10 @@ proc_create_runprogram(const char *name)
 	if (err) {
 		panic("runprogram: could not init fdtable: %d\n", err);
 	}
+	err = fdtable_init_console(newproc);
+	if (err) {
+		panic("runprogram: could not init console in fdtable: %d\n", err);
+	}
 
 	return newproc;
 }

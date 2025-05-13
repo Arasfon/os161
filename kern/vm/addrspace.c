@@ -30,9 +30,16 @@
 #include <types.h>
 #include <kern/errno.h>
 #include <lib.h>
+#include <spl.h>
+#include <cpu.h>
+#include <spinlock.h>
+#include <proc.h>
+#include <current.h>
+#include <mips/tlb.h>
 #include <addrspace.h>
 #include <vm.h>
-#include <proc.h>
+#include <mips/vm.h>
+#include <syscall.h>
 
 /*
  * Note! If OPT_DUMBVM is set, as is the case until you start the VM
@@ -40,6 +47,144 @@
  * used. The cheesy hack versions in dumbvm.c are used instead.
  */
 
+/*
+ * Helper function to round up to the nearest page boundary
+ */
+static inline vaddr_t
+page_align(vaddr_t addr)
+{
+	return ROUNDUP(addr, PAGE_SIZE);
+}
+
+/*
+ * Allocate a second-level page table
+ */
+int
+pt_alloc_l2(struct addrspace *as, int l1_index)
+{
+	struct pte *alloc;
+
+	KASSERT(as != NULL);
+	KASSERT(as->pt_l1 != NULL);
+	KASSERT(l1_index >= 0 && l1_index < PT_L1_SIZE);
+
+	/* Check if already allocated - assumes caller does NOT hold the lock */
+	if (as->pt_l1[l1_index] != NULL) {
+		return 0; /* Already allocated */
+	}
+
+	/* Allocate memory for the L2 page table without holding the lock */
+	alloc = kmalloc(PT_L2_SIZE * sizeof(struct pte));
+	if (alloc == NULL) {
+		return ENOMEM;
+	}
+
+	for (int i = 0; i < PT_L2_SIZE; i++) {
+		alloc[i].state = PTE_STATE_UNALLOC;
+		alloc[i].pfn = 0;
+		alloc[i].swap_slot = 0;
+		alloc[i].dirty = 0;
+		alloc[i].readonly = 0;
+	}
+
+	/* Acquire lock and check if another thread beat us */
+	spinlock_acquire(&as->pt_lock);
+
+	if (as->pt_l1[l1_index] != NULL) {
+		/* Another thread allocated this L2 table first */
+		spinlock_release(&as->pt_lock);
+		kfree(alloc);
+
+		return 0;
+	}
+
+	as->pt_l1[l1_index] = alloc;
+
+	spinlock_release(&as->pt_lock);
+
+	return 0;
+}
+
+/*
+ * Get a page table entry for a virtual address
+ * If create is true, allocate page tables as needed
+ */
+struct pte *
+pt_get_pte(struct addrspace *as, vaddr_t vaddr, bool create)
+{
+	struct pte **l1ptr;
+	int l1_index, l2_index;
+	int result;
+
+	KASSERT(as != NULL);
+
+	l1_index = L1_INDEX(vaddr);
+	l2_index = L2_INDEX(vaddr);
+
+	/* Check if we need to allocate the L1 page table */
+	if (as->pt_l1 == NULL) {
+		if (!create) {
+			return NULL;
+		}
+
+		/* Allocate L1 table - don't hold lock */
+		l1ptr = kmalloc(PT_L1_SIZE * sizeof(struct pte *));
+		if (l1ptr == NULL) {
+			return NULL;
+		}
+
+		for (int i = 0; i < PT_L1_SIZE; i++) {
+			l1ptr[i] = NULL;
+		}
+
+		/* Acquire lock and check if another thread beat us */
+		spinlock_acquire(&as->pt_lock);
+
+		if (as->pt_l1 != NULL) {
+			/* Another thread created the L1 table first */
+			spinlock_release(&as->pt_lock);
+			kfree(l1ptr);
+
+			/* Try again with the new L1 table */
+			return pt_get_pte(as, vaddr, create);
+		}
+
+		as->pt_l1 = l1ptr;
+
+		spinlock_release(&as->pt_lock);
+	}
+
+	/* Check if we need to allocate the L2 page table */
+	if (as->pt_l1[l1_index] == NULL) {
+		if (!create) {
+			return NULL;
+		}
+
+		result = pt_alloc_l2(as, l1_index);
+		if (result) {
+			return NULL;
+		}
+	}
+
+	spinlock_acquire(&as->pt_lock);
+
+	/* Double check that the L2 table exists after acquiring the lock */
+	if (as->pt_l1[l1_index] == NULL) {
+		/* Something went wrong - the L2 table should exist by now */
+		spinlock_release(&as->pt_lock);
+		return NULL;
+	}
+
+	struct pte *pte = &as->pt_l1[l1_index][l2_index];
+
+	spinlock_release(&as->pt_lock);
+
+	return pte;
+}
+
+/*
+ * Address space creation
+ */
 struct addrspace *
 as_create(void)
 {
@@ -50,43 +195,164 @@ as_create(void)
 		return NULL;
 	}
 
-	/*
-	 * Initialize as needed.
-	 */
+	as->pt_l1 = NULL;
+	as->regions = NULL;
+	as->heap_start = 0;
+	as->heap_end = 0;
+	spinlock_init(&as->pt_lock);
 
 	return as;
 }
 
+/*
+ * Create a copy of the address space
+ */
 int
 as_copy(struct addrspace *old, struct addrspace **ret)
 {
-	struct addrspace *newas;
+	struct addrspace *new;
+	struct region *old_region, *new_region, *prev_region;
 
-	newas = as_create();
-	if (newas==NULL) {
+	new = as_create();
+	if (new == NULL) {
 		return ENOMEM;
 	}
 
-	/*
-	 * Write this.
-	 */
+	new->heap_start = old->heap_start;
+	new->heap_end = old->heap_end;
 
-	(void)old;
+	/* Copy regions */
+	prev_region = NULL;
+	for (old_region = old->regions; old_region != NULL; old_region = old_region->next) {
+		new_region = kmalloc(sizeof(struct region));
 
-	*ret = newas;
+		if (new_region == NULL) {
+			as_destroy(new);
+			return ENOMEM;
+		}
+
+		new_region->vbase = old_region->vbase;
+		new_region->npages = old_region->npages;
+		new_region->readable = old_region->readable;
+		new_region->writeable = old_region->writeable;
+		new_region->executable = old_region->executable;
+		new_region->next = NULL;
+
+		if (prev_region == NULL) {
+			new->regions = new_region;
+		} else {
+			prev_region->next = new_region;
+		}
+
+		prev_region = new_region;
+	}
+
+	/* Copy page tables */
+	if (old->pt_l1 != NULL) {
+		/* Allocate L1 page table */
+		new->pt_l1 = kmalloc(PT_L1_SIZE * sizeof(struct pte *));
+		if (new->pt_l1 == NULL) {
+			as_destroy(new);
+			return ENOMEM;
+		}
+
+		for (int i = 0; i < PT_L1_SIZE; i++) {
+			new->pt_l1[i] = NULL;
+		}
+
+		/* Copy page tables and allocate pages */
+		for (int i = 0; i < PT_L1_SIZE; i++) {
+			if (old->pt_l1[i] != NULL) {
+				/* Allocate L2 page table */
+				int result = pt_alloc_l2(new, i);
+				if (result) {
+					as_destroy(new);
+					return result;
+				}
+
+				/* Copy page table entries */
+				for (int j = 0; j < PT_L2_SIZE; j++) {
+					struct pte *old_pte = &old->pt_l1[i][j];
+					struct pte *new_pte = &new->pt_l1[i][j];
+
+					new_pte->state = old_pte->state;
+					new_pte->readonly = old_pte->readonly;
+
+					if (old_pte->state == PTE_STATE_RAM) {
+						unsigned idx = alloc_upage(new, i * PT_L2_SIZE * PAGE_SIZE + j * PAGE_SIZE);
+						if (idx == 0) {
+							as_destroy(new);
+							return ENOMEM;
+						}
+
+						paddr_t pa_old = old_pte->pfn * PAGE_SIZE;
+						vaddr_t kv_old = PADDR_TO_KVADDR(pa_old);
+
+						paddr_t pa_new = idx_to_pa(idx);
+						vaddr_t kv_new = PADDR_TO_KVADDR(pa_new);
+
+						memmove((void*)kv_new, (void*)kv_old, PAGE_SIZE);
+
+						new_pte->pfn = idx;
+						new_pte->dirty = old_pte->dirty;
+					}
+					else if (old_pte->state == PTE_STATE_SWAP) {
+						/* For now mark as unallocated - we'll implement swapping later */
+						new_pte->state = PTE_STATE_UNALLOC;
+					}
+				}
+			}
+		}
+	}
+
+	*ret = new;
+
 	return 0;
 }
 
+/*
+ * Destroy an address space
+ */
 void
 as_destroy(struct addrspace *as)
 {
-	/*
-	 * Clean up as needed.
-	 */
+	struct region *reg, *next;
+
+	if (as == NULL) {
+		return;
+	}
+
+	/* Free all allocated physical pages */
+	if (as->pt_l1 != NULL) {
+		for (int i = 0; i < PT_L1_SIZE; i++) {
+			if (as->pt_l1[i] != NULL) {
+				for (int j = 0; j < PT_L2_SIZE; j++) {
+					struct pte *pte = &as->pt_l1[i][j];
+					if (pte->state == PTE_STATE_RAM) {
+						free_upage(pte->pfn);
+					}
+				}
+				kfree(as->pt_l1[i]);
+			}
+		}
+		kfree(as->pt_l1);
+	}
+
+	reg = as->regions;
+	while (reg != NULL) {
+		next = reg->next;
+		kfree(reg);
+		reg = next;
+	}
+
+	spinlock_cleanup(&as->pt_lock);
 
 	kfree(as);
 }
 
+/*
+ * Activate an address space
+ */
 void
 as_activate(void)
 {
@@ -101,82 +367,183 @@ as_activate(void)
 		return;
 	}
 
-	/*
-	 * Write this.
-	 */
-}
+	/* Disable interrupts for TLB operations */
+	int spl = splhigh();
 
-void
-as_deactivate(void)
-{
 	/*
-	 * Write this. For many designs it won't need to actually do
-	 * anything. See proc.c for an explanation of why it (might)
-	 * be needed.
+	 * We don’t track individual pages here, so we simply invalidate
+	 * every TLB slot. That guarantees no stale entries remain from
+	 * the previous address space. A more efficient design would
+	 * only evict entries for pages we’re actually changing.
 	 */
+	for (int i = 0; i < NUM_TLB; i++) {
+		tlb_write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+	}
+
+	/* Restore interrupts */
+	splx(spl);
 }
 
 /*
- * Set up a segment at virtual address VADDR of size MEMSIZE. The
- * segment in memory extends from VADDR up to (but not including)
- * VADDR+MEMSIZE.
- *
- * The READABLE, WRITEABLE, and EXECUTABLE flags are set if read,
- * write, or execute permission should be set on the segment. At the
- * moment, these are ignored. When you write the VM system, you may
- * want to implement them.
+ * Deactivate an address space
  */
-int
-as_define_region(struct addrspace *as, vaddr_t vaddr, size_t memsize,
-		 int readable, int writeable, int executable)
+void
+as_deactivate(void)
 {
-	/*
-	 * Write this.
-	 */
-
-	(void)as;
-	(void)vaddr;
-	(void)memsize;
-	(void)readable;
-	(void)writeable;
-	(void)executable;
-	return ENOSYS;
+	/* Nothing to do - we invalidate TLB in as_activate */
 }
 
+/*
+ * Set up a segment (memory region) in the address space
+ */
+int
+as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz,
+		 int readable, int writeable, int executable)
+{
+	struct region *reg;
+
+	KASSERT(as != NULL);
+
+	/* Adjust the size to page-align */
+	sz = page_align(sz + (vaddr & ~(vaddr_t)PAGE_FRAME));
+	vaddr &= PAGE_FRAME;
+
+	size_t npages = sz / PAGE_SIZE;
+
+	reg = kmalloc(sizeof(struct region));
+	if (reg == NULL) {
+		return ENOMEM;
+	}
+
+	reg->vbase = vaddr;
+	reg->npages = npages;
+	reg->readable = readable;
+	reg->writeable = writeable;
+	reg->executable = executable;
+
+	/* Add to region list */
+	reg->next = as->regions;
+	as->regions = reg;
+
+	/* Update heap_start if not set yet */
+	if (as->heap_start == 0) {
+		as->heap_start = vaddr + sz;
+		as->heap_end = as->heap_start;
+	} else {
+		/* Update heap_start if this region ends after current heap_start */
+		vaddr_t region_end = vaddr + sz;
+		if (region_end > as->heap_start) {
+			as->heap_start = region_end;
+			as->heap_end = as->heap_start;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Prepare an address space for loading
+ */
 int
 as_prepare_load(struct addrspace *as)
 {
 	/*
-	 * Write this.
-	 */
+	* Mark all pages in defined regions as ZERO, but leave them
+	* writable during the load. We'll fix up read-only flags
+	* later in as_complete_load().
+	*/
 
-	(void)as;
+	KASSERT(as != NULL);
+
+	struct region *reg;
+	vaddr_t vaddr;
+	size_t i;
+	struct pte *pte;
+
+	for (reg = as->regions; reg != NULL; reg = reg->next) {
+		vaddr = reg->vbase;
+
+		for (i = 0; i < reg->npages; i++, vaddr += PAGE_SIZE) {
+			/* Create PTE */
+			pte = pt_get_pte(as, vaddr, true);
+			if (pte == NULL) {
+				return ENOMEM;
+			}
+
+			spinlock_acquire(&as->pt_lock);
+
+			pte->state = PTE_STATE_ZERO;
+			/* leave writable during load, override later */
+			pte->readonly = false;
+
+			spinlock_release(&as->pt_lock);
+		}
+	}
+
 	return 0;
 }
 
+/*
+ * Complete the loading of an address space
+ */
 int
 as_complete_load(struct addrspace *as)
 {
 	/*
-	 * Write this.
-	 */
+	 * Now that load_segment/load_elf has copied all code & data
+	 * into the ZERO pages, walk every region again and set the
+	 * readonly flag according to the original as->regions info.
+	*/
 
-	(void)as;
+	KASSERT(as != NULL);
+
+	struct region *reg;
+	vaddr_t vaddr;
+	size_t i;
+	struct pte *pte;
+
+	for (reg = as->regions; reg != NULL; reg = reg->next) {
+		vaddr = reg->vbase;
+
+		for (i = 0; i < reg->npages; i++, vaddr += PAGE_SIZE) {
+			/* Lookup the PTE; it must already exist */
+			pte = pt_get_pte(as, vaddr, false);
+			if (pte == NULL) {
+				/* shouldn't happen if prepare_load succeeded */
+				continue;
+			}
+
+			spinlock_acquire(&as->pt_lock);
+
+			pte->readonly = !reg->writeable;
+
+			spinlock_release(&as->pt_lock);
+		}
+	}
+
 	return 0;
 }
 
+/*
+ * Set up the stack region in the address space
+ */
 int
 as_define_stack(struct addrspace *as, vaddr_t *stackptr)
 {
-	/*
-	 * Write this.
-	 */
+	/* Define the user stack region */
+	int result = as_define_region(as,
+		USERSTACK - STACKPAGES * PAGE_SIZE,
+		STACKPAGES * PAGE_SIZE,
+		1, /* readable */
+		1, /* writable */
+		0  /* not executable */);
 
-	(void)as;
+	if (result) {
+		return result;
+	}
 
 	/* Initial user-level stack pointer */
 	*stackptr = USERSTACK;
 
 	return 0;
 }
-

@@ -74,6 +74,9 @@ int vm_fault(int faulttype, vaddr_t faultaddress);
 vaddr_t alloc_kpages(unsigned npages);
 void free_kpages(vaddr_t addr);
 
+unsigned alloc_upage(struct addrspace *as, vaddr_t vaddr);
+void free_upage(unsigned idx);
+
 /* Coremap dump for statistics */
 void coremap_dump(void);
 
@@ -87,5 +90,22 @@ unsigned int coremap_used_bytes(void);
 /* TLB shootdown handling called from interprocessor_interrupt */
 void vm_tlbshootdown(const struct tlbshootdown *);
 
+// Convert page-frame index to physical address
+static
+inline
+paddr_t
+idx_to_pa(unsigned idx)
+{
+	return (paddr_t)idx * PAGE_SIZE;
+}
+
+// Convert physical address → page-frame index
+static
+inline
+unsigned
+pa_to_idx(paddr_t pa)
+{
+	return (unsigned)(pa / PAGE_SIZE);
+}
 
 #endif /* _VM_H_ */

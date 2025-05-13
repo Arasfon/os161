@@ -17,22 +17,6 @@ static unsigned coremap_pages = 0; /* total entries */
 static struct spinlock cm_lock = SPINLOCK_INITIALIZER;
 static bool vm_ready = false;
 
-// Convert page-frame index to physical address
-static
-paddr_t
-idx_to_pa(unsigned idx)
-{
-	return (paddr_t)idx * PAGE_SIZE;
-}
-
-// Convert physical address → page-frame index
-static
-unsigned
-pa_to_idx(paddr_t pa)
-{
-	return (unsigned)(pa / PAGE_SIZE);
-}
-
 /* Must be callable with interrupts on; panics if caller is in an IRQ
  * or already holding a spinlock. Same semantics as dumbvm_can_sleep. */
 static
@@ -70,9 +54,9 @@ coremap_dump(void)
 void
 vm_bootstrap(void)
 {
-	/* Physical memory layout							  
-	 * [0 ..... kernel_end)  : kernel+ELF sections		 
-	 * [kernel_end ..... ?)  : UNUSED at boot			  
+	/* Physical memory layout
+	 * [0 ..... kernel_end)  : kernel+ELF sections
+	 * [kernel_end ..... ?)  : UNUSED at boot
 	 */
 
 	paddr_t ram_top = ram_getsize(); // Bytes (exclusive)
@@ -214,7 +198,63 @@ free_kpages(vaddr_t kvaddr)
 	spinlock_release(&cm_lock);
 }
 
-// Returns total bytes not in CM_FREE state – handy for km5.
+/*
+ * Allocate a physical page for user space
+ * The page will be mapped to the virtual address vaddr in the address space as
+ * Returns the physical frame number, or 0 if allocation fails
+ */
+unsigned
+alloc_upage(struct addrspace *as, vaddr_t vaddr)
+{
+	vm_can_sleep();
+
+	spinlock_acquire(&cm_lock);
+
+	unsigned idx = cm_find_run(1);
+	if (idx == coremap_pages) {
+		spinlock_release(&cm_lock);
+
+		return 0; /* Out of memory */
+	}
+
+	/* Mark as user page */
+	coremap[idx].state = CM_USER;
+	coremap[idx].chunk_len = 1;
+	coremap[idx].as = as;
+	coremap[idx].vpn = VPN(vaddr);
+	coremap[idx].dirty = false;
+
+	spinlock_release(&cm_lock);
+
+	return idx;
+}
+
+/*
+ * Free a physical page for user space
+ * The page will be unmapped from the virtual address vaddr in the address space
+ */
+void
+free_upage(unsigned idx)
+{
+	KASSERT(vm_ready);
+	KASSERT(idx < coremap_pages);
+
+	spinlock_acquire(&cm_lock);
+
+	/* We expect exactly one–page allocations for user pages */
+	KASSERT(coremap[idx].state == CM_USER);
+	KASSERT(coremap[idx].chunk_len == 1);
+
+	coremap[idx].state = CM_FREE;
+	coremap[idx].chunk_len = 0;
+	coremap[idx].as = NULL;
+	coremap[idx].vpn = 0;
+	coremap[idx].dirty = false;
+
+	spinlock_release(&cm_lock);
+}
+
+// Returns total bytes not in CM_FREE state
 unsigned
 coremap_used_bytes(void)
 {
@@ -245,9 +285,170 @@ vm_tlbshootdown(const struct tlbshootdown *ts)
 int
 vm_fault(int faulttype, vaddr_t faultaddress)
 {
-	(void)faulttype;
-	(void)faultaddress;
-	panic("vm_fault: not yet implemented\n");
-	/* NOTREACHED */
-	return EFAULT;
+	struct addrspace *as;
+	struct pte *pte;
+	struct region *reg;
+	uint32_t ehi, elo;
+	unsigned pfn;
+	bool need_zero = false;
+	bool readonly = false;
+	bool in_any = false;
+
+	faultaddress &= PAGE_FRAME;
+	if (faultaddress >= MIPS_KSEG0) {
+		return EFAULT;
+	}
+
+	as = proc_getas();
+	if (as == NULL) {
+		return EFAULT;
+	}
+
+	if (faulttype == VM_FAULT_READONLY) {
+		return EFAULT;
+	}
+
+	/*
+	 * Scan the region list to see if this vaddr is in one of
+	 * the text/data/stack regions. If so, note whether it's
+	 * supposed to be writeable or not.
+	 */
+	for (reg = as->regions; reg != NULL; reg = reg->next) {
+		vaddr_t start = reg->vbase;
+		vaddr_t end = start + reg->npages * PAGE_SIZE;
+		if (faultaddress >= start && faultaddress < end) {
+			in_any = true;
+			readonly = !reg->writeable;
+			break;
+		}
+	}
+	/*
+	 * If it wasn't in any region, check the heap.
+	 * Heap pages are always writable.
+	 */
+	if (!in_any
+		&& faultaddress >= as->heap_start
+		&& faultaddress < as->heap_end)
+	{
+		in_any = true;
+		readonly = false;
+	}
+
+	/*
+	 * Try a non-allocating lookup first.
+	 */
+	pte = pt_get_pte(as, faultaddress, false);
+
+	spinlock_acquire(&as->pt_lock);
+
+	if (pte == NULL) {
+		/*
+		 * If the address isn’t in one of our regions/heap,
+		 * fault out. Otherwise allocate the PTE on demand.
+		 */
+		if (!in_any) {
+			spinlock_release(&as->pt_lock);
+			return EFAULT;
+		}
+
+		/*
+		 * Drop the lock before pt_get_pte.
+		 */
+		spinlock_release(&as->pt_lock);
+
+		pte = pt_get_pte(as, faultaddress, true);
+
+		if (pte == NULL) {
+			return ENOMEM;
+		}
+
+		spinlock_acquire(&as->pt_lock);
+
+		pte->state = PTE_STATE_ZERO;
+		pte->readonly = readonly;
+	} else {
+		/* Allow override because of as_prepare_load/as_complete_load */
+		readonly = pte->readonly;
+	}
+
+	/*
+	 * Handle each PTE state.
+	 */
+	switch (pte->state) {
+		case PTE_STATE_UNALLOC:
+		case PTE_STATE_ZERO:
+			need_zero = true;
+			break;
+		case PTE_STATE_SWAP:
+			spinlock_release(&as->pt_lock);
+			return EFAULT;
+		case PTE_STATE_RAM:
+			/* nothing special */
+			break;
+		default:
+			spinlock_release(&as->pt_lock);
+			return EFAULT;
+	}
+
+	/*
+	 * If we already have RAM, just install the TLB entry.
+	 */
+	if (!need_zero) {
+		ehi = faultaddress;
+		elo = (pte->pfn << 12) | TLBLO_VALID;
+
+		if (!pte->readonly) {
+			elo |= TLBLO_DIRTY;
+		}
+
+		spinlock_release(&as->pt_lock);
+
+		int spl = splhigh();
+
+		tlb_random(ehi, elo);
+
+		splx(spl);
+
+		return 0;
+	}
+
+	/*
+	 * Otherwise allocate, zero, re-lookup the PTE, and fill in.
+	 */
+	spinlock_release(&as->pt_lock);
+
+	pfn = alloc_upage(as, faultaddress);
+	if (pfn == 0) {
+		return ENOMEM;
+	}
+
+	vaddr_t kva = PADDR_TO_KVADDR(idx_to_pa(pfn));
+	bzero((void *)kva, PAGE_SIZE);
+
+	/* Re-lookup the PTE and update it to RAM */
+	pte = pt_get_pte(as, faultaddress, false);
+	spinlock_acquire(&as->pt_lock);
+
+	KASSERT(pte!=NULL && (pte->state==PTE_STATE_UNALLOC || pte->state==PTE_STATE_ZERO));
+
+	pte->state = PTE_STATE_RAM;
+	pte->pfn = pfn;
+
+	/* Install in TLB */
+	ehi = faultaddress;
+	elo = (pfn << 12) | TLBLO_VALID;
+
+	if (!readonly) {
+		elo |= TLBLO_DIRTY;
+	}
+
+	spinlock_release(&as->pt_lock);
+
+	int spl = splhigh();
+
+	tlb_random(ehi, elo);
+
+	splx(spl);
+
+	return 0;
 }

@@ -36,18 +36,47 @@
 
 
 #include <vm.h>
+#include <spinlock.h>
 #include "opt-dumbvm.h"
 
 struct vnode;
 
+/* Page table entry state constants */
+#define PTE_STATE_UNALLOC	0	/* Page not yet allocated; any reference forces it to be allocated and zero filled */
+#define PTE_STATE_ZERO		1	/* Allocated but has never been written; can be satisfied by zero-fill */
+#define PTE_STATE_RAM		2	/* Page resident in memory, pte.pfn valid */
+#define PTE_STATE_SWAP		3	/* Non-resident; contents live in swap_slot */
+
+/* Page table entry structure - each entry is 32 bits */
+struct pte {
+	uint32_t pfn		: 20;	/* Physical frame number when in RAM */
+	uint32_t swap_slot	: 20;	/* Swap slot number when swapped */
+	uint8_t state		: 2;	/* UNALLOC/ZERO/RAM/SWAP */
+	uint8_t dirty		: 1;	/* Set when page is modified */
+	uint8_t readonly	: 1;	/* Set for read-only pages */
+};
+
+/* Size of first and second level page tables */
+#define PT_L1_SIZE 1024 /* 10 bits -> 4 KiB L1 table */
+#define PT_L2_SIZE 1024 /* 10 bits -> 4 KiB L2 page */
+
+/* Number of pages in user stack */
+#define STACKPAGES 18 /* 16 pages = 64KB, 2 extra pages to allow 64KB argv in the tests */
+
+/* Region flags */
+struct region {
+	vaddr_t vbase; /* Base virtual address */
+	size_t npages; /* Number of pages in region */
+	int readable; /* Read permission */
+	int writeable; /* Write permission */
+	int executable; /* Execute permission */
+	struct region *next; /* Next region in linked list */
+};
 
 /*
  * Address space - data structure associated with the virtual memory
  * space of a process.
- *
- * You write this.
  */
-
 struct addrspace {
 #if OPT_DUMBVM
         vaddr_t as_vbase1;
@@ -58,9 +87,26 @@ struct addrspace {
         size_t as_npages2;
         paddr_t as_stackpbase;
 #else
-        /* Put stuff here for your VM system */
+		/* Two-level page table - dynamically allocated */
+		struct pte **pt_l1; /* First level page table */
+
+		/* List of memory regions */
+		struct region *regions;
+
+		/* Heap management */
+		vaddr_t heap_start; /* Start address of heap */
+		vaddr_t heap_end; /* Current end address of heap (break) */
+
+		/* Lock for page table operations */
+		struct spinlock pt_lock;
 #endif
 };
+
+/*
+ * Functions to manage page tables
+ */
+struct pte *pt_get_pte(struct addrspace *as, vaddr_t vaddr, bool create);
+int pt_alloc_l2(struct addrspace *as, int l1_index);
 
 /*
  * Functions in addrspace.c:
@@ -128,5 +174,9 @@ int               as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
 
 int load_elf(struct vnode *v, vaddr_t *entrypoint);
 
+/* VPN extraction macros */
+#define VPN(vaddr) ((vaddr) >> 12)
+#define L1_INDEX(vaddr) (VPN(vaddr) >> 10)
+#define L2_INDEX(vaddr) (VPN(vaddr) & 0x3FF)
 
 #endif /* _ADDRSPACE_H_ */

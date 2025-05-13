@@ -297,13 +297,13 @@ sys_kexecv(char *kprogname, char **kargs)
 {
 	int argc = 0;
 	size_t stringspace = 0;
-	
+
 	while (kargs[argc] != NULL) {
 		size_t len = strlen(kargs[argc]) + 1;
 		stringspace += ROUNDUP(len, 4);
 		argc++;
 	}
-	
+
 	// Should not return
 	return execv_core(kprogname, argc, kargs, stringspace);
 }
@@ -334,7 +334,7 @@ sys__exit(int exitcode)
 
 	// Record exit status and wake up any waiters
 	lock_acquire(p->p_cv_lock);
-	
+
 	if (exitcode > 0 && exitcode <= _NSIG) {
 		p->p_retval = _MKWAIT_SIG(exitcode);
 	} else {

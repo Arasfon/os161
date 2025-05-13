@@ -77,7 +77,7 @@ procarray_removefirst(struct procarray *a, struct proc *val) {
 			return true;
 		}
 	}
-	
+
 	return false;
 }
 
@@ -139,7 +139,7 @@ static
 struct proc *
 proc_create_sys(const char *name, pid_t pid) {
 	KASSERT(pid >= 0 && pid < PID_MIN);
-	
+
 	pid_t old_next_pid = next_pid;
 
 	struct proc *proc = proc_create(name);
@@ -450,7 +450,7 @@ struct proc *
 pid_table_lookup(pid_t pid)
 {
     struct proc *p = NULL;
-	
+
     spinlock_acquire(&pid_table_lock);
 
 	// Ignore the kernel process

@@ -530,6 +530,9 @@ as_complete_load(struct addrspace *as)
 int
 as_define_stack(struct addrspace *as, vaddr_t *stackptr)
 {
+    vaddr_t old_hstart = as->heap_start;
+    vaddr_t old_hend = as->heap_end;
+
 	/* Define the user stack region */
 	int result = as_define_region(as,
 		USERSTACK - STACKPAGES * PAGE_SIZE,
@@ -541,6 +544,9 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr)
 	if (result) {
 		return result;
 	}
+
+    as->heap_start = old_hstart;
+    as->heap_end = old_hend;
 
 	/* Initial user-level stack pointer */
 	*stackptr = USERSTACK;

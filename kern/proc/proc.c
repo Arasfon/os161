@@ -119,6 +119,7 @@ proc_create(const char *name)
 	proc->p_parent = NULL;
 	proc->p_children = procarray_create();
 	KASSERT(proc->p_children);
+	proc->p_children_lock = lock_create("proc_children_lock");
 
 	/* VM fields */
 	proc->p_addrspace = NULL;
@@ -187,12 +188,13 @@ proc_destroy(struct proc *proc)
 	 */
 
 	if (proc->p_parent != NULL) {
-		spinlock_acquire(&proc->p_parent->p_lock);
+		lock_acquire(proc->p_parent->p_children_lock);
 		procarray_removefirst(proc->p_parent->p_children, proc);
-		spinlock_release(&proc->p_parent->p_lock);
+		lock_release(proc->p_parent->p_children_lock);
 	}
 
 	pid_free(proc->p_pid);
+	lock_destroy(proc->p_children_lock);
 	procarray_destroy(proc->p_children);
 	cv_destroy(proc->p_cv);
 

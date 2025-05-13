@@ -90,6 +90,7 @@ struct proc {
 	struct lock *p_cv_lock;		/* Lock for cv */
 	struct proc *p_parent;		/* Parent (or NULL) */
 	struct procarray *p_children;		/* Children */
+	struct lock *p_children_lock;		/* Lock for children */
 
 	/* VM */
 	struct addrspace *p_addrspace;	/* virtual address space */

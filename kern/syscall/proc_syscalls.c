@@ -30,9 +30,9 @@ sys_fork(struct trapframe *tf, pid_t *retval)
 
 	// Record parent/child relationship
 	child->p_parent = curproc;
-	spinlock_acquire(&curproc->p_lock);
+	lock_acquire(curproc->p_children_lock);
 	procarray_add(curproc->p_children, child, NULL);
-	spinlock_release(&curproc->p_lock);
+	lock_release(curproc->p_children_lock);
 
 	// Duplicate the address space
 	err = as_copy(curproc->p_addrspace, &child_as);

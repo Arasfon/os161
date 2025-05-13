@@ -334,6 +334,10 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		readonly = false;
 	}
 
+	if (!in_any) {
+		return EFAULT;
+	}
+
 	/*
 	 * Try a non-allocating lookup first.
 	 */

@@ -89,6 +89,7 @@ cmd_progthread(void *ptr, unsigned long nargs)
 	progname = kmalloc(PATH_MAX);
 	if (!progname) {
 		kprintf("Running program %s failed: %s\n", args[0], strerror(ENOMEM));
+		sys__exit(ENOMEM);
 		return;
 	}
 
@@ -98,6 +99,7 @@ cmd_progthread(void *ptr, unsigned long nargs)
     char **kargs = kmalloc((nargs+1)*sizeof(char *));
     if (!kargs) {
         kprintf("Running program %s failed: %s\n", args[0], strerror(ENOMEM));
+		sys__exit(ENOMEM);
         return;
     }
 
@@ -110,6 +112,7 @@ cmd_progthread(void *ptr, unsigned long nargs)
 	if (result) {
 		kprintf("Running program %s failed: %s\n", args[0],
 			strerror(result));
+		sys__exit(result);
 		return;
 	}
 

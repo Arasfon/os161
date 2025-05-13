@@ -452,3 +452,18 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	return 0;
 }
+
+void tlb_invalidate(vaddr_t vaddr)
+{
+	int idx = -1;
+
+	int spl = splhigh();
+
+	idx = tlb_probe(vaddr, 0);
+
+	if (idx >= 0) {
+		tlb_write(TLBHI_INVALID(idx), TLBLO_INVALID(), idx);
+	}
+
+	splx(spl);
+}

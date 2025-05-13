@@ -78,4 +78,6 @@ int sys_kwaitpid(pid_t pid, int options, int *statuscode);
 int sys_waitpid(pid_t pid, userptr_t statusptr, int options, int *retval);
 int sys_getpid(int *retval);
 
+int sys_sbrk(intptr_t amount, int32_t *retval);
+
 #endif /* _SYSCALL_H_ */

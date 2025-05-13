@@ -90,6 +90,9 @@ unsigned int coremap_used_bytes(void);
 /* TLB shootdown handling called from interprocessor_interrupt */
 void vm_tlbshootdown(const struct tlbshootdown *);
 
+/* Invalidate TLB entry for specific vaddr */
+void tlb_invalidate(vaddr_t vaddr);
+
 // Convert page-frame index to physical address
 static
 inline

@@ -47,6 +47,11 @@ struct vnode;
 #define PTE_STATE_RAM		2	/* Page resident in memory, pte.pfn valid */
 #define PTE_STATE_SWAP		3	/* Non-resident; contents live in swap_slot */
 
+/* VPN extraction macros */
+#define VPN(vaddr) ((vaddr) >> 12)
+#define L1_INDEX(vaddr) (VPN(vaddr) >> 10)
+#define L2_INDEX(vaddr) (VPN(vaddr) & 0x3FF)
+
 /* Page table entry structure - each entry is 32 bits */
 struct pte {
 	uint32_t pfn		: 20;	/* Physical frame number when in RAM */
@@ -173,10 +178,5 @@ int               as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
  */
 
 int load_elf(struct vnode *v, vaddr_t *entrypoint);
-
-/* VPN extraction macros */
-#define VPN(vaddr) ((vaddr) >> 12)
-#define L1_INDEX(vaddr) (VPN(vaddr) >> 10)
-#define L2_INDEX(vaddr) (VPN(vaddr) & 0x3FF)
 
 #endif /* _ADDRSPACE_H_ */

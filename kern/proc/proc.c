@@ -102,7 +102,13 @@ proc_create(const char *name)
 	proc->p_numthreads = 0;
 	spinlock_init(&proc->p_lock);
 	proc->p_cv_lock = lock_create("proc_cv_lock");
-	KASSERT(proc->p_cv_lock);
+	if (!proc->p_cv_lock)
+	{
+		spinlock_cleanup(&proc->p_lock);
+		kfree(proc->p_name);
+		kfree(proc);
+		return NULL;
+	}
 
 	pid_t pid;
 	int err = pid_alloc(proc, &pid);
@@ -115,11 +121,41 @@ proc_create(const char *name)
 	proc->p_retval = 0;
 	proc->p_has_exited = false;
 	proc->p_cv = cv_create("proc_cv");
-	KASSERT(proc->p_cv);
+	if (!proc->p_cv)
+	{
+		pid_free(pid);
+		lock_destroy(proc->p_cv_lock);
+		spinlock_cleanup(&proc->p_lock);
+		kfree(proc->p_name);
+		kfree(proc);
+		return NULL;
+	}
+
 	proc->p_parent = NULL;
 	proc->p_children = procarray_create();
-	KASSERT(proc->p_children);
+	if (!proc->p_children)
+	{
+		cv_destroy(proc->p_cv);
+		pid_free(pid);
+		lock_destroy(proc->p_cv_lock);
+		spinlock_cleanup(&proc->p_lock);
+		kfree(proc->p_name);
+		kfree(proc);
+		return NULL;
+	}
+
 	proc->p_children_lock = lock_create("proc_children_lock");
+	if (!proc->p_children_lock)
+	{
+		procarray_destroy(proc->p_children);
+		cv_destroy(proc->p_cv);
+		pid_free(pid);
+		lock_destroy(proc->p_cv_lock);
+		spinlock_cleanup(&proc->p_lock);
+		kfree(proc->p_name);
+		kfree(proc);
+		return NULL;
+	}
 
 	/* VM fields */
 	proc->p_addrspace = NULL;
@@ -143,6 +179,7 @@ proc_create_sys(const char *name, pid_t pid) {
 	pid_t old_next_pid = next_pid;
 
 	struct proc *proc = proc_create(name);
+	KASSERT(proc);
 
 	pid_free(proc->p_pid);
 

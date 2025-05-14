@@ -275,15 +275,15 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 					struct pte *old_pte = &old->pt_l1[i][j];
 					struct pte *new_pte = &new->pt_l1[i][j];
 
-					new_pte->state = old_pte->state;
-					new_pte->readonly = old_pte->readonly;
-
 					if (old_pte->state == PTE_STATE_RAM) {
 						unsigned idx = alloc_upage(new, i * PT_L2_SIZE * PAGE_SIZE + j * PAGE_SIZE);
 						if (idx == 0) {
 							as_destroy(new);
 							return ENOMEM;
 						}
+
+						new_pte->state = old_pte->state;
+						new_pte->readonly = old_pte->readonly;
 
 						paddr_t pa_old = old_pte->pfn * PAGE_SIZE;
 						vaddr_t kv_old = PADDR_TO_KVADDR(pa_old);
@@ -299,6 +299,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 					else if (old_pte->state == PTE_STATE_SWAP) {
 						/* For now mark as unallocated - we'll implement swapping later */
 						new_pte->state = PTE_STATE_UNALLOC;
+						new_pte->readonly = old_pte->readonly;
 					}
 				}
 			}

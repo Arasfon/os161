@@ -54,11 +54,11 @@ struct vnode;
 
 /* Page table entry structure - each entry is 32 bits */
 struct pte {
-	uint32_t pfn		: 20;	/* Physical frame number when in RAM */
-	uint32_t swap_slot	: 20;	/* Swap slot number when swapped */
-	uint8_t state		: 2;	/* UNALLOC/ZERO/RAM/SWAP */
-	uint8_t dirty		: 1;	/* Set when page is modified */
-	uint8_t readonly	: 1;	/* Set for read-only pages */
+	uint32_t pfn;	/* Physical frame number when in RAM */
+	uint32_t swap_slot;	/* Swap slot number when swapped */
+	uint8_t state;	/* UNALLOC/ZERO/RAM/SWAP */
+	uint8_t dirty;	/* Set when page is modified */
+	uint8_t readonly;	/* Set for read-only pages */
 };
 
 /* Size of first and second level page tables */

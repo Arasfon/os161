@@ -40,6 +40,11 @@ sys_sbrk(intptr_t amount, int32_t *retval)
 			spinlock_release(&as->pt_lock);
 			return ENOMEM;
 		}
+
+		as->heap_end = new_break;
+		spinlock_release(&as->pt_lock);
+		*retval = (int32_t)old_break;
+		return 0;
 	} else {
 		if (old_break < (vaddr_t)-amount) {
 			spinlock_release(&as->pt_lock);
@@ -58,11 +63,17 @@ sys_sbrk(intptr_t amount, int32_t *retval)
 		 * so they remain consistent during our processing
 		 */
 		vaddr_t free_start = ROUNDUP(new_break, PAGE_SIZE);
-		vaddr_t free_end = ROUNDDOWN(old_break, PAGE_SIZE);
+		vaddr_t free_end = ROUNDDOWN(old_break + PAGE_SIZE - 1, PAGE_SIZE);
 
 		/* Update heap_end while still holding the spinlock */
 		as->heap_end = new_break;
 		spinlock_release(&as->pt_lock);
+
+		/* Skip the loop if no pages to free */
+		if (free_start >= free_end) {
+			*retval = (int32_t)old_break;
+			return 0;
+		}
 
 		/* Now free pages with individual PTE locks */
 		for (vaddr_t va = free_start; va < free_end; va += PAGE_SIZE) {
@@ -77,6 +88,14 @@ sys_sbrk(intptr_t amount, int32_t *retval)
 					pte->state = PTE_STATE_UNALLOC;
 					tlb_invalidate(va);
 				}
+				else if (pte->state == PTE_STATE_SWAP) {
+					swap_free(pte->swap_slot);
+					pte->swap_slot = 0;
+					pte->state = PTE_STATE_UNALLOC;
+				}
+				else if (pte->state == PTE_STATE_ZERO) {
+					pte->state = PTE_STATE_UNALLOC;
+				}
 
 				lock_release(pte->pte_lock);
 			}
@@ -86,12 +105,4 @@ sys_sbrk(intptr_t amount, int32_t *retval)
 		*retval = (int32_t)old_break;
 		return 0;
 	}
-
-	as->heap_end = new_break;
-
-	spinlock_release(&as->pt_lock);
-
-	*retval = (int32_t)old_break;
-
-	return 0;
 }

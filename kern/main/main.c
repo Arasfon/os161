@@ -128,6 +128,7 @@ boot(void)
 
 	/* Late phase of initialization. */
 	coremap_dump();
+	swap_init();
 	kprintf_bootstrap();
 	thread_start_cpus();
 	test161_bootstrap();

@@ -63,6 +63,13 @@ struct coremap_entry {
 	uint32_t vpn; /* user virtual page number */
 };
 
+/* Swap space management */
+struct swapmap {
+	struct bitmap *swap_bitmap; /* Tracks used/free swap slots */
+	struct spinlock swap_lock; /* Lock for swap operations */
+	struct vnode *swap_vnode; /* VNode for the swap device */
+	unsigned swap_size; /* Total number of swap slots */
+};
 
 /* Initialization function */
 void vm_bootstrap(void);
@@ -92,6 +99,13 @@ void vm_tlbshootdown(const struct tlbshootdown *);
 
 /* Invalidate TLB entry for specific vaddr */
 void tlb_invalidate(vaddr_t vaddr);
+
+/* Swap initialization and operations */
+int swap_init(void);
+int swap_alloc(unsigned *idx);
+void swap_free(unsigned idx);
+int swap_out(paddr_t paddr, unsigned idx);
+int swap_in(paddr_t paddr, unsigned idx);
 
 /* Functions for page eviction to swap */
 int vm_mark_page_evicting(unsigned idx);

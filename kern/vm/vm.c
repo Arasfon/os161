@@ -11,11 +11,67 @@
 #include <vm.h>
 #include <mips/vm.h>
 #include <current.h>
+#include <vfs.h>
+#include <uio.h>
+#include <vnode.h>
+#include <kern/fcntl.h>
+#include <kern/stat.h>
+#include <bitmap.h>
 
 static struct coremap_entry *coremap = NULL; /* KSEG0 pointer */
 static unsigned coremap_pages = 0; /* total entries */
 static struct spinlock cm_lock = SPINLOCK_INITIALIZER;
 static bool vm_ready = false;
+
+static struct swapmap swap_info;
+
+/*
+ * Initialize the swap system
+ * This should be called late in the boot process
+ */
+int
+swap_init(void)
+{
+	if (swap_info.swap_bitmap != NULL) {
+		return 0;
+	}
+
+	spinlock_init(&swap_info.swap_lock);
+
+	char swap_dev[] = "lhd0raw:";
+	int result = vfs_open(swap_dev, O_RDWR, 0, &swap_info.swap_vnode);
+	if (result) {
+		panic("swap_init: cannot open swap device %s: %s\n",
+			swap_dev, strerror(result));
+		return result;
+	}
+
+	/* Get the size of the swap device (in bytes) */
+	struct stat swap_stat;
+	result = VOP_STAT(swap_info.swap_vnode, &swap_stat);
+	if (result) {
+		panic("swap_init: cannot stat swap device: %s\n", strerror(result));
+		vfs_close(swap_info.swap_vnode);
+		swap_info.swap_vnode = NULL;
+		return result;
+	}
+
+	/* Calculate the number of pages we can swap */
+	swap_info.swap_size = swap_stat.st_size / PAGE_SIZE;
+	kprintf("swap: %u pages (%lld KB)\n",
+		swap_info.swap_size, swap_stat.st_size / 1024);
+
+	/* Create the bitmap */
+	swap_info.swap_bitmap = bitmap_create(swap_info.swap_size);
+	if (swap_info.swap_bitmap == NULL) {
+		panic("swap_init: cannot create swap bitmap\n");
+		vfs_close(swap_info.swap_vnode);
+		swap_info.swap_vnode = NULL;
+		return ENOMEM;
+	}
+
+	return 0;
+}
 
 /* Must be callable with interrupts on; panics if caller is in an IRQ
  * or already holding a spinlock. Same semantics as dumbvm_can_sleep. */
@@ -601,4 +657,88 @@ vm_find_eviction_victim(unsigned *idx_ret)
 	/* No suitable page found */
 	spinlock_release(&cm_lock);
 	return ENOENT;
+}
+
+/*
+ * Allocate a swap slot
+ */
+int
+swap_alloc(unsigned *idx)
+{
+	int result;
+
+	KASSERT(swap_info.swap_bitmap != NULL);
+	KASSERT(idx != NULL);
+
+	spinlock_acquire(&swap_info.swap_lock);
+
+	result = bitmap_alloc(swap_info.swap_bitmap, idx);
+
+	spinlock_release(&swap_info.swap_lock);
+
+	return result ? 0 : ENOSPC;
+}
+
+/*
+ * Free a swap slot
+ */
+void
+swap_free(unsigned idx)
+{
+	KASSERT(swap_info.swap_bitmap != NULL);
+	KASSERT(idx < swap_info.swap_size);
+
+	spinlock_acquire(&swap_info.swap_lock);
+
+	bitmap_unmark(swap_info.swap_bitmap, idx);
+
+	spinlock_release(&swap_info.swap_lock);
+}
+
+/*
+ * Swap a page out to disk
+ */
+int
+swap_out(paddr_t paddr, unsigned idx)
+{
+	struct iovec iov;
+	struct uio ku;
+	int result;
+
+	KASSERT(swap_info.swap_vnode != NULL);
+	KASSERT(idx < swap_info.swap_size);
+
+	uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
+		  idx * PAGE_SIZE, UIO_WRITE);
+
+	result = VOP_WRITE(swap_info.swap_vnode, &ku);
+	if (result) {
+		kprintf("swap_out: write failed: %s\n", strerror(result));
+	}
+
+	return result;
+}
+
+/*
+ * Swap a page in from disk
+ */
+int
+swap_in(paddr_t paddr, unsigned idx)
+{
+	struct iovec iov;
+	struct uio ku;
+	int result;
+
+	KASSERT(swap_info.swap_vnode != NULL);
+	KASSERT(idx < swap_info.swap_size);
+
+	uio_kinit(&iov, &ku, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE,
+		  idx * PAGE_SIZE, UIO_READ);
+
+	result = VOP_READ(swap_info.swap_vnode, &ku);
+	if (result) {
+		kprintf("swap_in: read failed: %s\n", strerror(result));
+	}
+
+	return result;
 }

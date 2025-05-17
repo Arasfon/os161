@@ -57,10 +57,11 @@ struct vnode;
 struct pte {
 	uint32_t pfn;	/* Physical frame number when in RAM */
 	uint32_t swap_slot;	/* Swap slot number when swapped */
-	uint8_t state;	/* UNALLOC/ZERO/RAM/SWAP */
-	uint8_t dirty;	/* Set when page is modified */
-	uint8_t readonly;	/* Set for read-only pages */
-	uint8_t referenced;	/* Set when page is accessed, used for replacement policy */
+	uint8_t state : 2;	/* UNALLOC/ZERO/RAM/SWAP */
+	uint8_t dirty : 1;	/* Set when page is modified */
+	uint8_t readonly : 1;	/* Set for read-only pages */
+	uint8_t referenced : 1;	/* Set when page is accessed */
+	uint8_t _padding : 3;	/* Unused padding bits for alignment */
 	struct lock *pte_lock;	/* Lock for this specific page table entry */
 };
 

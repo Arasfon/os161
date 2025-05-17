@@ -22,6 +22,7 @@ sys_sbrk(intptr_t amount, int32_t *retval)
 		return EFAULT;
 	}
 
+	/* We need the global lock for heap_end/heap_start */
 	spinlock_acquire(&as->pt_lock);
 	old_break = as->heap_end;
 
@@ -52,20 +53,38 @@ sys_sbrk(intptr_t amount, int32_t *retval)
 			return EINVAL; // Overflow
 		}
 
+		/*
+		 * Store these values before releasing the spinlock
+		 * so they remain consistent during our processing
+		 */
 		vaddr_t free_start = ROUNDUP(new_break, PAGE_SIZE);
 		vaddr_t free_end = ROUNDDOWN(old_break, PAGE_SIZE);
 
-		for (vaddr_t va = free_start; va < free_end; va += PAGE_SIZE) {
-			spinlock_release(&as->pt_lock);
-			struct pte *pte = pt_get_pte(as, va, false);
-			spinlock_acquire(&as->pt_lock);
+		/* Update heap_end while still holding the spinlock */
+		as->heap_end = new_break;
+		spinlock_release(&as->pt_lock);
 
-			if (pte != NULL && pte->state == PTE_STATE_RAM) {
-				free_upage(pte->pfn);
-				pte->state = PTE_STATE_UNALLOC;
-				tlb_invalidate(va);
+		/* Now free pages with individual PTE locks */
+		for (vaddr_t va = free_start; va < free_end; va += PAGE_SIZE) {
+			struct pte *pte = pt_get_pte(as, va, false);
+
+			if (pte != NULL) {
+				/* Acquire the lock for this specific PTE */
+				lock_acquire(pte->pte_lock);
+
+				if (pte->state == PTE_STATE_RAM) {
+					free_upage(pte->pfn);
+					pte->state = PTE_STATE_UNALLOC;
+					tlb_invalidate(va);
+				}
+
+				lock_release(pte->pte_lock);
 			}
 		}
+
+		/* Don't need to reacquire the spinlock since we've already updated heap_end */
+		*retval = (int32_t)old_break;
+		return 0;
 	}
 
 	as->heap_end = new_break;

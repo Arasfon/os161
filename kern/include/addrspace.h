@@ -37,6 +37,7 @@
 
 #include <vm.h>
 #include <spinlock.h>
+#include <synch.h>
 #include "opt-dumbvm.h"
 
 struct vnode;
@@ -59,6 +60,7 @@ struct pte {
 	uint8_t state;	/* UNALLOC/ZERO/RAM/SWAP */
 	uint8_t dirty;	/* Set when page is modified */
 	uint8_t readonly;	/* Set for read-only pages */
+	struct lock *pte_lock;	/* Lock for this specific page table entry */
 };
 
 /* Size of first and second level page tables */

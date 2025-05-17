@@ -343,22 +343,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	 */
 	pte = pt_get_pte(as, faultaddress, false);
 
-	spinlock_acquire(&as->pt_lock);
-
 	if (pte == NULL) {
-		/*
-		 * If the address isn’t in one of our regions/heap,
-		 * fault out. Otherwise allocate the PTE on demand.
-		 */
-		if (!in_any) {
-			spinlock_release(&as->pt_lock);
-			return EFAULT;
-		}
-
-		/*
-		 * Drop the lock before pt_get_pte.
-		 */
-		spinlock_release(&as->pt_lock);
 
 		pte = pt_get_pte(as, faultaddress, true);
 
@@ -366,11 +351,15 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 			return ENOMEM;
 		}
 
-		spinlock_acquire(&as->pt_lock);
+		lock_acquire(pte->pte_lock);
+
+		KASSERT(pte->state == PTE_STATE_UNALLOC);
 
 		pte->state = PTE_STATE_ZERO;
 		pte->readonly = readonly;
 	} else {
+		lock_acquire(pte->pte_lock);
+
 		/* Allow override because of as_prepare_load/as_complete_load */
 		readonly = pte->readonly;
 	}
@@ -384,13 +373,13 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 			need_zero = true;
 			break;
 		case PTE_STATE_SWAP:
-			spinlock_release(&as->pt_lock);
+			lock_release(pte->pte_lock);
 			return EFAULT;
 		case PTE_STATE_RAM:
 			/* nothing special */
 			break;
 		default:
-			spinlock_release(&as->pt_lock);
+			lock_release(pte->pte_lock);
 			return EFAULT;
 	}
 
@@ -405,7 +394,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 			elo |= TLBLO_DIRTY;
 		}
 
-		spinlock_release(&as->pt_lock);
+		lock_release(pte->pte_lock);
 
 		int spl = splhigh();
 
@@ -418,8 +407,9 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	/*
 	 * Otherwise allocate, zero, re-lookup the PTE, and fill in.
+	 * We need to release the lock before allocating to avoid deadlocks.
 	 */
-	spinlock_release(&as->pt_lock);
+	lock_release(pte->pte_lock);
 
 	pfn = alloc_upage(as, faultaddress);
 	if (pfn == 0) {
@@ -431,9 +421,12 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	/* Re-lookup the PTE and update it to RAM */
 	pte = pt_get_pte(as, faultaddress, false);
-	spinlock_acquire(&as->pt_lock);
 
-	KASSERT(pte!=NULL && (pte->state==PTE_STATE_UNALLOC || pte->state==PTE_STATE_ZERO));
+	KASSERT(pte != NULL);
+
+	lock_acquire(pte->pte_lock);
+
+	KASSERT(pte->state == PTE_STATE_UNALLOC || pte->state == PTE_STATE_ZERO);
 
 	pte->state = PTE_STATE_RAM;
 	pte->pfn = pfn;
@@ -446,7 +439,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		elo |= TLBLO_DIRTY;
 	}
 
-	spinlock_release(&as->pt_lock);
+	lock_release(pte->pte_lock);
 
 	int spl = splhigh();
 

@@ -63,6 +63,7 @@ int
 pt_alloc_l2(struct addrspace *as, int l1_index)
 {
 	struct pte *alloc;
+	char lock_name[] = "pte_lock";
 
 	KASSERT(as != NULL);
 	KASSERT(as->pt_l1 != NULL);
@@ -85,6 +86,18 @@ pt_alloc_l2(struct addrspace *as, int l1_index)
 		alloc[i].swap_slot = 0;
 		alloc[i].dirty = 0;
 		alloc[i].readonly = 0;
+
+		/* Create a lock for each page table entry */
+		//snprintf(lock_name, sizeof(lock_name), "pte_lock_%d_%d", l1_index, i);
+		alloc[i].pte_lock = lock_create(lock_name);
+		if (alloc[i].pte_lock == NULL) {
+			/* Clean up already allocated locks */
+			for (int j = 0; j < i; j++) {
+				lock_destroy(alloc[j].pte_lock);
+			}
+			kfree(alloc);
+			return ENOMEM;
+		}
 	}
 
 	/* Acquire lock and check if another thread beat us */
@@ -93,6 +106,11 @@ pt_alloc_l2(struct addrspace *as, int l1_index)
 	if (as->pt_l1[l1_index] != NULL) {
 		/* Another thread allocated this L2 table first */
 		spinlock_release(&as->pt_lock);
+
+		/* Clean up all locks and free the allocated memory */
+		for (int i = 0; i < PT_L2_SIZE; i++) {
+			lock_destroy(alloc[i].pte_lock);
+		}
 		kfree(alloc);
 
 		return 0;
@@ -166,6 +184,10 @@ pt_get_pte(struct addrspace *as, vaddr_t vaddr, bool create)
 		}
 	}
 
+	/*
+	 * We still need to use the spinlock to safely access the L1 table,
+	 * but afterwards we can use the individual PTE lock for the specific entry
+	 */
 	spinlock_acquire(&as->pt_lock);
 
 	/* Double check that the L2 table exists after acquiring the lock */
@@ -176,6 +198,11 @@ pt_get_pte(struct addrspace *as, vaddr_t vaddr, bool create)
 	}
 
 	struct pte *pte = &as->pt_l1[l1_index][l2_index];
+
+	/* Note that we don't acquire the PTE lock here
+	 * This function only returns the PTE, it doesn't modify it
+	 * The caller should acquire the PTE lock if it needs to modify the PTE
+	 */
 
 	spinlock_release(&as->pt_lock);
 
@@ -263,7 +290,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		/* Copy page tables and allocate pages */
 		for (int i = 0; i < PT_L1_SIZE; i++) {
 			if (old->pt_l1[i] != NULL) {
-				/* Allocate L2 page table */
+				/* Allocate L2 page table (this also initializes all the PTE locks) */
 				int result = pt_alloc_l2(new, i);
 				if (result) {
 					as_destroy(new);
@@ -275,9 +302,18 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 					struct pte *old_pte = &old->pt_l1[i][j];
 					struct pte *new_pte = &new->pt_l1[i][j];
 
+					/* Lock both old and new PTEs while copying */
+					lock_acquire(old_pte->pte_lock);
+					lock_acquire(new_pte->pte_lock);
+
+					KASSERT(new_pte->state == PTE_STATE_UNALLOC);
+
 					if (old_pte->state == PTE_STATE_RAM) {
 						unsigned idx = alloc_upage(new, i * PT_L2_SIZE * PAGE_SIZE + j * PAGE_SIZE);
 						if (idx == 0) {
+							/* Release locks before destroying the address space */
+							lock_release(new_pte->pte_lock);
+							lock_release(old_pte->pte_lock);
 							as_destroy(new);
 							return ENOMEM;
 						}
@@ -301,6 +337,10 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 						new_pte->state = PTE_STATE_UNALLOC;
 						new_pte->readonly = old_pte->readonly;
 					}
+
+					/* Release the locks */
+					lock_release(new_pte->pte_lock);
+					lock_release(old_pte->pte_lock);
 				}
 			}
 		}
@@ -319,31 +359,35 @@ as_destroy(struct addrspace *as)
 {
 	struct region *reg, *next;
 
-	if (as == NULL) {
-		return;
+	KASSERT(as != NULL);
+
+	/* Clean up the regions */
+	for (reg = as->regions; reg != NULL; reg = next) {
+		next = reg->next;
+		kfree(reg);
 	}
 
-	/* Free all allocated physical pages */
+	/* Clean up page tables, freeing memory when needed */
 	if (as->pt_l1 != NULL) {
 		for (int i = 0; i < PT_L1_SIZE; i++) {
 			if (as->pt_l1[i] != NULL) {
 				for (int j = 0; j < PT_L2_SIZE; j++) {
 					struct pte *pte = &as->pt_l1[i][j];
+
+					/* Free kernel memory for non-resident page */
 					if (pte->state == PTE_STATE_RAM) {
 						free_upage(pte->pfn);
+					}
+
+					/* Free the PTE lock */
+					if (pte->pte_lock != NULL) {
+						lock_destroy(pte->pte_lock);
 					}
 				}
 				kfree(as->pt_l1[i]);
 			}
 		}
 		kfree(as->pt_l1);
-	}
-
-	reg = as->regions;
-	while (reg != NULL) {
-		next = reg->next;
-		kfree(reg);
-		reg = next;
 	}
 
 	spinlock_cleanup(&as->pt_lock);
@@ -372,10 +416,10 @@ as_activate(void)
 	int spl = splhigh();
 
 	/*
-	 * We don’t track individual pages here, so we simply invalidate
+	 * We don't track individual pages here, so we simply invalidate
 	 * every TLB slot. That guarantees no stale entries remain from
 	 * the previous address space. A more efficient design would
-	 * only evict entries for pages we’re actually changing.
+	 * only evict entries for pages we're actually changing.
 	 */
 	for (int i = 0; i < NUM_TLB; i++) {
 		tlb_write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
@@ -471,13 +515,15 @@ as_prepare_load(struct addrspace *as)
 				return ENOMEM;
 			}
 
-			spinlock_acquire(&as->pt_lock);
+			lock_acquire(pte->pte_lock);
+
+			KASSERT(pte->state == PTE_STATE_UNALLOC || pte->state == PTE_STATE_ZERO);
 
 			pte->state = PTE_STATE_ZERO;
 			/* leave writable during load, override later */
 			pte->readonly = false;
 
-			spinlock_release(&as->pt_lock);
+			lock_release(pte->pte_lock);
 		}
 	}
 
@@ -514,11 +560,13 @@ as_complete_load(struct addrspace *as)
 				continue;
 			}
 
-			spinlock_acquire(&as->pt_lock);
+			lock_acquire(pte->pte_lock);
+
+			KASSERT(pte->state == PTE_STATE_ZERO || pte->state == PTE_STATE_RAM);
 
 			pte->readonly = !reg->writeable;
 
-			spinlock_release(&as->pt_lock);
+			lock_release(pte->pte_lock);
 		}
 	}
 

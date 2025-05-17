@@ -52,7 +52,8 @@
 enum cm_state {
 	CM_FREE, /* page available */
 	CM_FIXED, /* kernel / coremap / other wired page */
-	CM_USER /* page owned by a user address-space */
+	CM_USER, /* page owned by a user address-space */
+	CM_EVICTING /* page is currently being evicted to swap */
 };
 
 struct coremap_entry {
@@ -91,6 +92,11 @@ void vm_tlbshootdown(const struct tlbshootdown *);
 
 /* Invalidate TLB entry for specific vaddr */
 void tlb_invalidate(vaddr_t vaddr);
+
+/* Functions for page eviction to swap */
+int vm_mark_page_evicting(unsigned idx);
+void vm_eviction_finished(unsigned idx);
+int vm_find_eviction_victim(unsigned *idx_ret);
 
 // Convert page-frame index to physical address
 static

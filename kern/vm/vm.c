@@ -32,7 +32,7 @@ vm_can_sleep(void)
 void
 coremap_dump(void)
 {
-	unsigned free = 0, fixed = 0, user = 0;
+	unsigned free = 0, fixed = 0, user = 0, evicting = 0;
 
 	for (unsigned i = 0; i < coremap_pages; i++) {
 		switch (coremap[i].state) {
@@ -45,10 +45,14 @@ coremap_dump(void)
 		case CM_USER:
 			user++;
 			break;
+		case CM_EVICTING:
+			evicting++;
+			break;
 		}
 	}
 
-	kprintf("coremap: %u pages total | %u free  %u kernel  %u user\n", coremap_pages, free, fixed, user);
+	kprintf("coremap: %u pages total | %u free  %u kernel  %u user  %u evicting\n",
+		coremap_pages, free, fixed, user, evicting);
 }
 
 void
@@ -237,6 +241,13 @@ free_upage(unsigned idx)
 	KASSERT(idx < coremap_pages);
 
 	spinlock_acquire(&cm_lock);
+
+	/* Check if the page is being evicted */
+	if (coremap[idx].state == CM_EVICTING) {
+		/* Page is being evicted, don't free it now */
+		spinlock_release(&cm_lock);
+		return;
+	}
 
 	/* We expect exactly one–page allocations for user pages */
 	KASSERT(coremap[idx].state == CM_USER);
@@ -463,4 +474,131 @@ void tlb_invalidate(vaddr_t vaddr)
 	}
 
 	splx(spl);
+}
+
+/*
+ * Mark a page as being evicted to swap.
+ * Returns:
+ *   0 on success
+ *   EBUSY if the page is already being evicted
+ *   EINVAL if the page is not a user page
+ */
+int
+vm_mark_page_evicting(unsigned idx)
+{
+	KASSERT(vm_ready);
+	KASSERT(idx < coremap_pages);
+
+	spinlock_acquire(&cm_lock);
+
+	if (coremap[idx].state != CM_USER) {
+		/* Only user pages can be evicted */
+		spinlock_release(&cm_lock);
+		return EINVAL;
+	}
+
+	if (coremap[idx].state == CM_EVICTING) {
+		/* Page is already being evicted */
+		spinlock_release(&cm_lock);
+		return EBUSY;
+	}
+
+	/* Mark the page as being evicted */
+	coremap[idx].state = CM_EVICTING;
+
+	spinlock_release(&cm_lock);
+	return 0;
+}
+
+/*
+ * Mark a page eviction as finished.
+ * This transitions the page from CM_EVICTING to CM_FREE.
+ */
+void
+vm_eviction_finished(unsigned idx)
+{
+	KASSERT(vm_ready);
+	KASSERT(idx < coremap_pages);
+
+	spinlock_acquire(&cm_lock);
+
+	KASSERT(coremap[idx].state == CM_EVICTING);
+	KASSERT(coremap[idx].chunk_len == 1); /* User pages are always 1 page */
+
+	/* Reset the coremap entry */
+	coremap[idx].state = CM_FREE;
+	coremap[idx].chunk_len = 0;
+	coremap[idx].as = NULL;
+	coremap[idx].vpn = 0;
+
+	spinlock_release(&cm_lock);
+}
+
+/*
+ * Find a user page that can be evicted to swap.
+ * Implements a simple clock (second-chance) algorithm.
+ *
+ * Returns:
+ *   0 on success with *idx_ret set to the page index
+ *   ENOENT if no victim could be found
+ */
+int
+vm_find_eviction_victim(unsigned *idx_ret)
+{
+	static unsigned victim_next = 0;
+	unsigned start_pos;
+
+	KASSERT(vm_ready);
+	KASSERT(idx_ret != NULL);
+
+	spinlock_acquire(&cm_lock);
+
+	/* Start from the last position we checked */
+	start_pos = victim_next;
+
+	/* First pass: look for pages with reference bit cleared */
+	for (unsigned i = 0; i < coremap_pages; i++) {
+		unsigned idx = (start_pos + i) % coremap_pages;
+
+		if (coremap[idx].state == CM_USER) {
+			/* Found a user page, check if it's not referenced */
+			struct addrspace *as = coremap[idx].as;
+			vaddr_t vaddr = coremap[idx].vpn * PAGE_SIZE;
+			struct pte *pte = pt_get_pte(as, vaddr, false);
+
+			if (pte != NULL) {
+				lock_acquire(pte->pte_lock);
+
+				if (pte->referenced == 0) {
+					/* This page hasn't been used recently, evict it */
+					victim_next = (idx + 1) % coremap_pages;
+					*idx_ret = idx;
+					lock_release(pte->pte_lock);
+					spinlock_release(&cm_lock);
+					return 0;
+				}
+
+				/* Mark the page as not referenced for next round */
+				pte->referenced = 0;
+				lock_release(pte->pte_lock);
+			}
+		}
+	}
+
+	/* Second pass: just take any user page */
+	for (unsigned i = 0; i < coremap_pages; i++) {
+		unsigned idx = (start_pos + i) % coremap_pages;
+
+		if (coremap[idx].state == CM_USER) {
+			/* Found a user page, use it */
+			victim_next = (idx + 1) % coremap_pages;
+			*idx_ret = idx;
+			spinlock_release(&cm_lock);
+			return 0;
+		}
+	}
+
+	/* No suitable page found */
+	spinlock_release(&cm_lock);
+	return ENOENT;
 }

@@ -344,6 +344,9 @@ sys__exit(int exitcode)
 	p->p_has_exited = true;
 	cv_broadcast(p->p_cv, p->p_cv_lock);
 
+	// Detach from our process
+	proc_remthread(curthread);
+
 	lock_release(p->p_cv_lock);
 
 	// We will not free the pid here because zombie processes exist

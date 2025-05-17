@@ -207,7 +207,21 @@ alloc_kpages(unsigned npages)
 	unsigned idx = cm_find_run(npages);
 	if (idx == coremap_pages) {
 		spinlock_release(&cm_lock);
-		return 0; // Out of memory
+
+		/* Only try eviction for single-page allocations */
+		if (npages == 1) {
+			unsigned evict_idx;
+			int result = vm_evict_page(&evict_idx);
+			if (result == 0) {
+				spinlock_acquire(&cm_lock);
+				idx = evict_idx;
+			} else {
+				return 0;
+			}
+		} else {
+			/* Multi-page allocations can't be satisfied through eviction */
+			return 0;
+		}
 	}
 
 	/* Mark allocation */
@@ -272,7 +286,12 @@ alloc_upage(struct addrspace *as, vaddr_t vaddr)
 	if (idx == coremap_pages) {
 		spinlock_release(&cm_lock);
 
-		return 0; /* Out of memory */
+		int result = vm_evict_page(&idx);
+		if (result) {
+			return 0;
+		}
+
+		spinlock_acquire(&cm_lock);
 	}
 
 	/* Mark as user page */
@@ -435,9 +454,47 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		case PTE_STATE_ZERO:
 			need_zero = true;
 			break;
-		case PTE_STATE_SWAP:
+		case PTE_STATE_SWAP: {
+			/* Page is in swap, need to bring it back */
+			unsigned swap_idx = pte->swap_slot;
+
+			/* Allocate a physical page */
+			pfn = alloc_upage(as, faultaddress);
+			if (pfn == 0) {
+				return ENOMEM;
+			}
+
+			paddr_t paddr = idx_to_pa(pfn);
+
+			int result = swap_in(paddr, swap_idx);
+			if (result) {
+				free_upage(pfn);
+				return result;
+			}
+
+			swap_free(swap_idx);
+
+			pte->state = PTE_STATE_RAM;
+			pte->pfn = pfn;
+			pte->swap_slot = 0;
+			pte->referenced = 1;
+
+			/* Install in TLB */
+			ehi = faultaddress;
+			elo = (pfn << 12) | TLBLO_VALID;
+
+			if (!readonly) {
+				elo |= TLBLO_DIRTY;
+			}
+
 			lock_release(pte->pte_lock);
-			return EFAULT;
+
+			int spl = splhigh();
+			tlb_random(ehi, elo);
+			splx(spl);
+
+			return 0;
+		}
 		case PTE_STATE_RAM:
 			/* nothing special */
 			break;
@@ -471,10 +528,8 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	}
 
 	/*
-	 * Otherwise allocate, zero, re-lookup the PTE, and fill in.
-	 * We need to release the lock before allocating to avoid deadlocks.
+	 * Otherwise allocate, zero, and fill in.
 	 */
-	lock_release(pte->pte_lock);
 
 	pfn = alloc_upage(as, faultaddress);
 	if (pfn == 0) {
@@ -483,13 +538,6 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	vaddr_t kva = PADDR_TO_KVADDR(idx_to_pa(pfn));
 	bzero((void *)kva, PAGE_SIZE);
-
-	/* Re-lookup the PTE and update it to RAM */
-	pte = pt_get_pte(as, faultaddress, false);
-
-	KASSERT(pte != NULL);
-
-	lock_acquire(pte->pte_lock);
 
 	KASSERT(pte->state == PTE_STATE_UNALLOC || pte->state == PTE_STATE_ZERO);
 
@@ -603,59 +651,86 @@ vm_find_eviction_victim(unsigned *idx_ret)
 {
 	static unsigned victim_next = 0;
 	unsigned start_pos;
+	bool found = false;
+	unsigned candidate_idx;
 
 	KASSERT(vm_ready);
 	KASSERT(idx_ret != NULL);
-
-	spinlock_acquire(&cm_lock);
 
 	/* Start from the last position we checked */
 	start_pos = victim_next;
 
 	/* First pass: look for pages with reference bit cleared */
-	for (unsigned i = 0; i < coremap_pages; i++) {
-		unsigned idx = (start_pos + i) % coremap_pages;
+	for (unsigned i = 0; i < coremap_pages && !found; i++) {
+		unsigned idx;
+		struct addrspace *as;
+		vaddr_t vaddr;
+		struct pte *pte;
 
-		if (coremap[idx].state == CM_USER) {
-			/* Found a user page, check if it's not referenced */
-			struct addrspace *as = coremap[idx].as;
-			vaddr_t vaddr = coremap[idx].vpn * PAGE_SIZE;
-			struct pte *pte = pt_get_pte(as, vaddr, false);
+		spinlock_acquire(&cm_lock);
 
-			if (pte != NULL) {
-				lock_acquire(pte->pte_lock);
+		idx = (start_pos + i) % coremap_pages;
 
-				if (pte->referenced == 0) {
-					/* This page hasn't been used recently, evict it */
-					victim_next = (idx + 1) % coremap_pages;
-					*idx_ret = idx;
-					lock_release(pte->pte_lock);
-					spinlock_release(&cm_lock);
-					return 0;
-				}
-
-				/* Mark the page as not referenced for next round */
-				pte->referenced = 0;
-				lock_release(pte->pte_lock);
-			}
+		if (coremap[idx].state != CM_USER) {
+			spinlock_release(&cm_lock);
+			continue;
 		}
+
+		as = coremap[idx].as;
+		vaddr = coremap[idx].vpn * PAGE_SIZE;
+
+		spinlock_release(&cm_lock);
+
+		pte = pt_get_pte(as, vaddr, false);
+
+		if (pte == NULL) {
+			continue;
+		}
+
+		lock_acquire(pte->pte_lock);
+
+		if (pte->referenced == 0) {
+			candidate_idx = idx;
+			found = true;
+
+			victim_next = (idx + 1) % coremap_pages;
+		}
+		else {
+			/* Mark the page as not referenced for next round */
+			pte->referenced = 0;
+		}
+
+		lock_release(pte->pte_lock);
+
+		if (found) {
+			break;
+		}
+	}
+
+	if (found) {
+		*idx_ret = candidate_idx;
+		return 0;
 	}
 
 	/* Second pass: just take any user page */
 	for (unsigned i = 0; i < coremap_pages; i++) {
-		unsigned idx = (start_pos + i) % coremap_pages;
+		unsigned idx;
+
+		spinlock_acquire(&cm_lock);
+
+		idx = (start_pos + i) % coremap_pages;
 
 		if (coremap[idx].state == CM_USER) {
-			/* Found a user page, use it */
-			victim_next = (idx + 1) % coremap_pages;
 			*idx_ret = idx;
+			victim_next = (idx + 1) % coremap_pages;
 			spinlock_release(&cm_lock);
 			return 0;
 		}
+
+		spinlock_release(&cm_lock);
 	}
 
 	/* No suitable page found */
-	spinlock_release(&cm_lock);
 	return ENOENT;
 }
 
@@ -676,7 +751,7 @@ swap_alloc(unsigned *idx)
 
 	spinlock_release(&swap_info.swap_lock);
 
-	return result ? 0 : ENOSPC;
+	return result ? ENOSPC : 0;
 }
 
 /*
@@ -741,4 +816,75 @@ swap_in(paddr_t paddr, unsigned idx)
 	}
 
 	return result;
+}
+
+/*
+ * Evict a page to swap when memory is full.
+ */
+int
+vm_evict_page(unsigned *idx_ret)
+{
+	int result;
+	unsigned victim_idx;
+	paddr_t paddr;
+	unsigned swap_idx;
+	struct addrspace *as;
+	vaddr_t vaddr;
+	struct pte *pte;
+
+	KASSERT(idx_ret != NULL);
+
+	result = vm_find_eviction_victim(&victim_idx);
+	if (result) {
+		return result;
+	}
+
+	result = vm_mark_page_evicting(victim_idx);
+	if (result) {
+		return result;
+	}
+
+	paddr = idx_to_pa(victim_idx);
+	as = coremap[victim_idx].as;
+	vaddr = coremap[victim_idx].vpn * PAGE_SIZE;
+
+	KASSERT(as != NULL);
+
+	pte = pt_get_pte(as, vaddr, false);
+
+	KASSERT(pte != NULL);
+
+	lock_acquire(pte->pte_lock);
+
+	KASSERT(pte->state == PTE_STATE_RAM);
+	KASSERT(pte->pfn == victim_idx);
+
+	result = swap_alloc(&swap_idx);
+	if (result) {
+		lock_release(pte->pte_lock);
+		vm_eviction_finished(victim_idx);
+		return ENOMEM;
+	}
+
+	result = swap_out(paddr, swap_idx);
+	if (result) {
+		swap_free(swap_idx);
+		lock_release(pte->pte_lock);
+		vm_eviction_finished(victim_idx);
+		return result;
+	}
+
+	tlb_invalidate(vaddr);
+
+	pte->state = PTE_STATE_SWAP;
+	pte->swap_slot = swap_idx;
+	pte->pfn = 0;
+
+	lock_release(pte->pte_lock);
+
+	vm_eviction_finished(victim_idx);
+
+	*idx_ret = victim_idx;
+
+	return 0;
 }

@@ -112,6 +112,9 @@ int vm_mark_page_evicting(unsigned idx);
 void vm_eviction_finished(unsigned idx);
 int vm_find_eviction_victim(unsigned *idx_ret);
 
+/* Evict a page and free up physical memory */
+int vm_evict_page(unsigned *idx_ret);
+
 // Convert page-frame index to physical address
 static
 inline

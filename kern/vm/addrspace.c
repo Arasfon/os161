@@ -335,10 +335,58 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 						new_pte->dirty = old_pte->dirty;
 					}
 					else if (old_pte->state == PTE_STATE_SWAP) {
-						/* For now mark as unallocated - we'll implement swapping later */
-						new_pte->state = PTE_STATE_UNALLOC;
+						/* Allocate a new swap slot for the page */
+						unsigned new_swap_idx;
+						int result = swap_alloc(&new_swap_idx);
+						if (result) {
+							lock_release(new_pte->pte_lock);
+							lock_release(old_pte->pte_lock);
+							as_destroy(new);
+							return ENOMEM;
+						}
+
+						/* Allocate a temporary physical page to hold the data */
+						unsigned idx = alloc_upage(new, i * PT_L2_SIZE * PAGE_SIZE + j * PAGE_SIZE);
+						if (idx == 0) {
+							swap_free(new_swap_idx);
+							lock_release(new_pte->pte_lock);
+							lock_release(old_pte->pte_lock);
+							as_destroy(new);
+							return ENOMEM;
+						}
+
+						paddr_t temp_paddr = idx_to_pa(idx);
+						result = swap_in(temp_paddr, old_pte->swap_slot);
+						if (result) {
+							free_upage(idx);
+							swap_free(new_swap_idx);
+							lock_release(new_pte->pte_lock);
+							lock_release(old_pte->pte_lock);
+							as_destroy(new);
+							return result;
+						}
+
+						result = swap_out(temp_paddr, new_swap_idx);
+						if (result) {
+							free_upage(idx);
+							swap_free(new_swap_idx);
+							lock_release(new_pte->pte_lock);
+							lock_release(old_pte->pte_lock);
+							as_destroy(new);
+							return result;
+						}
+
+						free_upage(idx);
+
+						/* Set up the new PTE to point to swap */
+						new_pte->state = PTE_STATE_SWAP;
 						new_pte->readonly = old_pte->readonly;
+						new_pte->swap_slot = new_swap_idx;
 						new_pte->referenced = 0;
+					}
+					else if (old_pte->state == PTE_STATE_ZERO) {
+						new_pte->state = PTE_STATE_ZERO;
+						new_pte->readonly = old_pte->readonly;
 					}
 
 					/* Release the locks */
@@ -377,13 +425,22 @@ as_destroy(struct addrspace *as)
 				for (int j = 0; j < PT_L2_SIZE; j++) {
 					struct pte *pte = &as->pt_l1[i][j];
 
-					/* Free kernel memory for non-resident page */
+					if (pte->pte_lock != NULL) {
+						lock_acquire(pte->pte_lock);
+					}
+
+					/* Free physical memory for pages in RAM */
 					if (pte->state == PTE_STATE_RAM) {
 						free_upage(pte->pfn);
+					}
+					/* Free swap slots for pages in swap */
+					else if (pte->state == PTE_STATE_SWAP) {
+						swap_free(pte->swap_slot);
 					}
 
 					/* Free the PTE lock */
 					if (pte->pte_lock != NULL) {
+						lock_release(pte->pte_lock);
 						lock_destroy(pte->pte_lock);
 					}
 				}

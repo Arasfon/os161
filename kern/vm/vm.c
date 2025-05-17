@@ -83,7 +83,6 @@ vm_bootstrap(void)
 		coremap[i].chunk_len = 0;
 		coremap[i].as = NULL;
 		coremap[i].vpn = 0;
-		coremap[i].dirty = false;
 
 		if (page_addr < free_base) {
 			coremap[i].state = CM_FIXED; /* kernel or coremap itself */
@@ -192,7 +191,6 @@ free_kpages(vaddr_t kvaddr)
 		coremap[idx + j].chunk_len = 0;
 		coremap[idx + j].as = NULL;
 		coremap[idx + j].vpn = 0;
-		coremap[idx + j].dirty = false;
 	}
 
 	spinlock_release(&cm_lock);
@@ -222,7 +220,6 @@ alloc_upage(struct addrspace *as, vaddr_t vaddr)
 	coremap[idx].chunk_len = 1;
 	coremap[idx].as = as;
 	coremap[idx].vpn = VPN(vaddr);
-	coremap[idx].dirty = false;
 
 	spinlock_release(&cm_lock);
 
@@ -249,7 +246,6 @@ free_upage(unsigned idx)
 	coremap[idx].chunk_len = 0;
 	coremap[idx].as = NULL;
 	coremap[idx].vpn = 0;
-	coremap[idx].dirty = false;
 
 	spinlock_release(&cm_lock);
 }

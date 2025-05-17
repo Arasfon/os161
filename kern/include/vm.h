@@ -60,7 +60,6 @@ struct coremap_entry {
 	uint16_t chunk_len; /* run length if first page; else 0 */
 	struct addrspace *as; /* owning address-space (CM_USER) */
 	uint32_t vpn; /* user virtual page number */
-	bool dirty; /* page modified since last flush  */
 };
 
 

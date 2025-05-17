@@ -86,6 +86,7 @@ pt_alloc_l2(struct addrspace *as, int l1_index)
 		alloc[i].swap_slot = 0;
 		alloc[i].dirty = 0;
 		alloc[i].readonly = 0;
+		alloc[i].referenced = 0;
 
 		/* Create a lock for each page table entry */
 		//snprintf(lock_name, sizeof(lock_name), "pte_lock_%d_%d", l1_index, i);
@@ -320,6 +321,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 						new_pte->state = old_pte->state;
 						new_pte->readonly = old_pte->readonly;
+						new_pte->referenced = old_pte->referenced;
 
 						paddr_t pa_old = old_pte->pfn * PAGE_SIZE;
 						vaddr_t kv_old = PADDR_TO_KVADDR(pa_old);
@@ -336,6 +338,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 						/* For now mark as unallocated - we'll implement swapping later */
 						new_pte->state = PTE_STATE_UNALLOC;
 						new_pte->readonly = old_pte->readonly;
+						new_pte->referenced = 0;
 					}
 
 					/* Release the locks */

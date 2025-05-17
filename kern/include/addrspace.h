@@ -60,6 +60,7 @@ struct pte {
 	uint8_t state;	/* UNALLOC/ZERO/RAM/SWAP */
 	uint8_t dirty;	/* Set when page is modified */
 	uint8_t readonly;	/* Set for read-only pages */
+	uint8_t referenced;	/* Set when page is accessed, used for replacement policy */
 	struct lock *pte_lock;	/* Lock for this specific page table entry */
 };
 

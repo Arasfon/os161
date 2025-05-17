@@ -390,6 +390,8 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 			elo |= TLBLO_DIRTY;
 		}
 
+		pte->referenced = 1;
+
 		lock_release(pte->pte_lock);
 
 		int spl = splhigh();
@@ -426,6 +428,8 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	pte->state = PTE_STATE_RAM;
 	pte->pfn = pfn;
+	/* Mark as referenced since we're loading it for the first time */
+	pte->referenced = 1;
 
 	/* Install in TLB */
 	ehi = faultaddress;
